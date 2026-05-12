@@ -1,0 +1,154 @@
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ProviderSettings:
+    dem_provider: str = "AUTO"
+    coast_provider: str = "AUTO"
+    river_provider: str = "AUTO"
+    road_provider: str = "AUTO"
+    admin_provider: str = "AUTO"
+    basemap_provider: str = "AUTO"
+
+    @classmethod
+    def from_preferences(cls, prefs) -> "ProviderSettings":
+        if prefs is None:
+            return cls()
+        return cls(
+            dem_provider=getattr(prefs, "dem_provider", "AUTO"),
+            coast_provider=getattr(prefs, "coast_provider", "AUTO"),
+            river_provider=getattr(prefs, "river_provider", "AUTO"),
+            road_provider=getattr(prefs, "road_provider", "AUTO"),
+            admin_provider=getattr(prefs, "admin_provider", "AUTO"),
+            basemap_provider=getattr(prefs, "basemap_provider", "AUTO"),
+        )
+
+
+@dataclass(frozen=True)
+class GenerationSettings:
+    input_mode: str
+    country_region: str
+    latitude: float
+    longitude: float
+    latitude2: float
+    longitude2: float
+    quality_preset: str
+    output_preset: str
+    detail_level: str
+    import_coast: bool
+    import_rivers: bool
+    import_relief: bool
+    dem_resolution: str
+    dem_height_scale: float
+    drape_vectors_on_dem: bool
+    vector_z_offset: float
+    road_width: float
+    road_geometry: str
+    river_width: float
+    river_geometry: str
+    boundary_width: float
+    coast_width: float
+    print_base_height: float
+    add_legend: bool
+    add_scale_bar: bool
+    import_roads: bool
+    import_admin: bool
+    import_cities: bool
+    import_poi_historic: bool
+    import_poi_cultural: bool
+    import_poi_administrative: bool
+    import_poi_natural: bool
+    admin_level: str
+    import_satellite: bool
+    map_style: str
+    satellite_resolution: int
+
+    @classmethod
+    def from_props(cls, props) -> "GenerationSettings":
+        values = {name: getattr(props, name) for name in cls.__dataclass_fields__}
+        values.update(_quality_preset_values(values))
+        values.update(_output_preset_values(values))
+        return cls(**values)
+
+
+def apply_quality_preset_to_props(props) -> None:
+    values = _quality_preset_values(
+        {
+            "quality_preset": props.quality_preset,
+            "detail_level": props.detail_level,
+            "dem_resolution": props.dem_resolution,
+            "satellite_resolution": props.satellite_resolution,
+        }
+    )
+    for key, value in values.items():
+        setattr(props, key, value)
+
+
+def apply_output_preset_to_props(props) -> None:
+    values = _output_preset_values({"output_preset": props.output_preset})
+    for key, value in values.items():
+        setattr(props, key, value)
+
+
+def _quality_preset_values(values: dict) -> dict:
+    presets = {
+        "PREVIEW": {
+            "detail_level": "LOW",
+            "dem_resolution": "DEM_LOW",
+            "satellite_resolution": 512,
+        },
+        "BALANCED": {
+            "detail_level": "MEDIUM",
+            "dem_resolution": "DEM_MEDIUM",
+            "satellite_resolution": 2048,
+        },
+        "HIGH_QUALITY": {
+            "detail_level": "HIGH",
+            "dem_resolution": "DEM_HIGH",
+            "satellite_resolution": 4096,
+        },
+        "LARGE_AREA": {
+            "detail_level": "LOW",
+            "dem_resolution": "DEM_LOW",
+            "satellite_resolution": 1024,
+        },
+    }
+    return presets.get(values.get("quality_preset"), {})
+
+
+def _output_preset_values(values: dict) -> dict:
+    presets = {
+        "BLENDER_VIEW": {
+            "road_width": 0.045,
+            "river_width": 0.060,
+            "boundary_width": 0.025,
+            "coast_width": 0.035,
+            "vector_z_offset": 0.030,
+            "print_base_height": 0.250,
+        },
+        "RENDER": {
+            "road_width": 0.070,
+            "river_width": 0.090,
+            "boundary_width": 0.035,
+            "coast_width": 0.050,
+            "vector_z_offset": 0.040,
+            "print_base_height": 0.250,
+        },
+        "PRINT_3D": {
+            "road_width": 0.090,
+            "river_width": 0.110,
+            "boundary_width": 0.055,
+            "coast_width": 0.070,
+            "vector_z_offset": 0.060,
+            "print_base_height": 0.350,
+        },
+        "GAME_ENGINE": {
+            "road_width": 0.035,
+            "river_width": 0.045,
+            "boundary_width": 0.018,
+            "coast_width": 0.025,
+            "vector_z_offset": 0.020,
+            "print_base_height": 0.0,
+        },
+    }
+    return presets.get(values.get("output_preset"), {})
