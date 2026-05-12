@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
-from .download_cache import cached_bytes
+from .download_cache import cached_bytes, read_index, write_index
 from .exceptions import CancelledGeneration, ProviderError
 from .models import BoundingBox, SatelliteTile
 
@@ -30,6 +30,39 @@ _WEB_MERCATOR_MAX_LAT = 85.05112878
 _MIN_RESOLUTION = 256
 _IMAGERY_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 _MAX_TILE_WORKERS = 4
+
+
+def _bbox_to_entry(bbox: BoundingBox) -> dict[str, float]:
+    return {
+        "min_lat": bbox.min_lat,
+        "min_lon": bbox.min_lon,
+        "max_lat": bbox.max_lat,
+        "max_lon": bbox.max_lon,
+    }
+
+
+def _bbox_from_entry(entry: dict) -> BoundingBox | None:
+    raw = entry.get("bbox")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return BoundingBox(
+            float(raw["min_lat"]),
+            float(raw["min_lon"]),
+            float(raw["max_lat"]),
+            float(raw["max_lon"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _same_bbox(a: BoundingBox, b: BoundingBox, tolerance: float = 1e-7) -> bool:
+    return (
+        abs(a.min_lat - b.min_lat) <= tolerance
+        and abs(a.min_lon - b.min_lon) <= tolerance
+        and abs(a.max_lat - b.max_lat) <= tolerance
+        and abs(a.max_lon - b.max_lon) <= tolerance
+    )
 
 
 def _web_mercator_meters(lat: float, lon: float) -> tuple[float, float]:
@@ -133,6 +166,10 @@ class SatelliteImageryClient:
         if provider not in _BASEMAP_PROVIDERS:
             raise ProviderError(f"Unsupported map imagery provider: {provider}")
         self._raise_if_cancelled(should_cancel)
+        cached_path = self._find_cached_image(bbox, resolution, map_style, provider)
+        if cached_path:
+            return cached_path
+
         width_px, height_px, mercator_bbox = _image_size_for_bbox(
             bbox, min(resolution, _MAX_EXPORT_RESOLUTION)
         )
@@ -165,7 +202,63 @@ class SatelliteImageryClient:
 
         output = Path(tempfile.gettempdir()) / f"geomap_satellite_bbox{suffix}.png"
         output.write_bytes(image_bytes)
+        self._store_image_index(bbox, resolution, map_style, provider, output)
         return output
+
+    def _find_cached_image(
+        self,
+        bbox: BoundingBox,
+        resolution: int,
+        map_style: str,
+        provider: str,
+    ) -> Path | None:
+        best: tuple[float, Path] | None = None
+        requested = min(resolution, _MAX_EXPORT_RESOLUTION)
+        for entry in read_index("imagery_geo"):
+            if entry.get("provider") != provider or entry.get("map_style") != map_style:
+                continue
+            if int(entry.get("resolution", 0)) < requested:
+                continue
+            cached_bbox = _bbox_from_entry(entry)
+            if not cached_bbox or not _same_bbox(cached_bbox, bbox):
+                continue
+            path = Path(str(entry.get("path", "")))
+            if not path.exists():
+                continue
+            area = max(cached_bbox.lat_span() * cached_bbox.lon_span(), 0.0)
+            if best is None or area < best[0]:
+                best = (area, path)
+        return best[1] if best else None
+
+    @staticmethod
+    def _store_image_index(
+        bbox: BoundingBox,
+        resolution: int,
+        map_style: str,
+        provider: str,
+        path: Path,
+    ) -> None:
+        key = (
+            f"{provider}|{map_style}|{min(resolution, _MAX_EXPORT_RESOLUTION)}|"
+            f"{bbox.min_lat:.7f},{bbox.min_lon:.7f},{bbox.max_lat:.7f},{bbox.max_lon:.7f}"
+        )
+        entries = [
+            entry
+            for entry in read_index("imagery_geo")
+            if entry.get("key") != key and entry.get("path") != str(path)
+        ]
+        entries.insert(
+            0,
+            {
+                "key": key,
+                "provider": provider,
+                "map_style": map_style,
+                "resolution": min(resolution, _MAX_EXPORT_RESOLUTION),
+                "path": str(path),
+                "bbox": _bbox_to_entry(bbox),
+            },
+        )
+        write_index("imagery_geo", entries[:300])
 
     @staticmethod
     def _raise_if_cancelled(should_cancel: Callable[[], bool] | None) -> None:

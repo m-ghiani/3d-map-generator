@@ -90,6 +90,35 @@ def _cache_path(namespace: str, key: str, suffix: str) -> Path | None:
     return base / f"{digest}.{suffix}"
 
 
+def cache_file_path(namespace: str, key: str, suffix: str) -> Path | None:
+    return _cache_path(namespace, key, suffix)
+
+
+def read_index(namespace: str) -> list[dict]:
+    base = _cache_dir(namespace)
+    if base is None:
+        return []
+    path = base / "index.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def write_index(namespace: str, entries: list[dict]) -> None:
+    base = _cache_dir(namespace)
+    if base is None:
+        return
+    path = base / "index.json"
+    try:
+        path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _is_fresh(path: Path, ttl_seconds: int) -> bool:
     return time.time() - path.stat().st_mtime <= ttl_seconds
 

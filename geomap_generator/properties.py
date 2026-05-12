@@ -158,6 +158,9 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         default=0.002,
         min=0.0001,
         max=0.05,
+        soft_min=0.0001,
+        soft_max=0.01,
+        step=1,
         precision=4,
         description="Blender units per meter of elevation",
     )
@@ -171,6 +174,9 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         default=0.03,
         min=0.0,
         max=1.0,
+        soft_min=0.0,
+        soft_max=0.12,
+        step=1,
         precision=3,
         description="Vertical offset above terrain or map plane in Blender units",
     )
@@ -179,6 +185,9 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         default=0.045,
         min=0.0,
         max=1.0,
+        soft_min=0.0,
+        soft_max=0.18,
+        step=1,
         precision=3,
         description="Generated road ribbon width in Blender units",
     )
@@ -195,6 +204,9 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         default=0.06,
         min=0.0,
         max=1.0,
+        soft_min=0.0,
+        soft_max=0.22,
+        step=1,
         precision=3,
         description="Generated river ribbon width in Blender units",
     )
@@ -211,6 +223,9 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         default=0.025,
         min=0.0,
         max=1.0,
+        soft_min=0.0,
+        soft_max=0.12,
+        step=1,
         precision=3,
         description="Generated administrative boundary ribbon width in Blender units",
     )
@@ -219,6 +234,9 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         default=0.035,
         min=0.0,
         max=1.0,
+        soft_min=0.0,
+        soft_max=0.14,
+        step=1,
         precision=3,
         description="Generated coastline ribbon width in Blender units",
     )
@@ -227,6 +245,9 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         default=0.25,
         min=0.0,
         max=5.0,
+        soft_min=0.0,
+        soft_max=1.0,
+        step=1,
         precision=3,
         description="Thickness of the closed terrain base for 3D printing",
     )

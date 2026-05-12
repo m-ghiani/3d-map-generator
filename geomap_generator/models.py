@@ -58,6 +58,14 @@ class BoundingBox:
     def lon_span(self) -> float:
         return self.max_lon - self.min_lon
 
+    def contains(self, other: "BoundingBox", tolerance: float = 1e-9) -> bool:
+        return (
+            self.min_lat <= other.min_lat + tolerance
+            and self.min_lon <= other.min_lon + tolerance
+            and self.max_lat >= other.max_lat - tolerance
+            and self.max_lon >= other.max_lon - tolerance
+        )
+
     def split(self, max_lat_span: float, max_lon_span: float) -> list["BoundingBox"]:
         rows = max(1, math.ceil(self.lat_span() / max_lat_span))
         cols = max(1, math.ceil(self.lon_span() / max_lon_span))
