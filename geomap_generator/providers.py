@@ -14,6 +14,7 @@ class VectorDataProvider(Protocol):
         coastlines: bool = False,
         rivers: bool = False,
         roads: bool = False,
+        buildings: bool = False,
         admin_level: str | None = None,
         cities: bool = False,
         poi_historic: bool = False,
@@ -49,6 +50,7 @@ class ImageryProvider(Protocol):
         resolution: int,
         map_style: str = "SATELLITE",
         provider: str = "AUTO",
+        tokens: dict[str, str] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> list[SatelliteTile]:
         ...

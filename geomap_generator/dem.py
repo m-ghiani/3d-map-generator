@@ -121,9 +121,13 @@ class DemClient:
             raise ProviderError("DEM service returned an unexpected number of elevations.")
 
         if progress:
-            progress("DEM elevation data ready", progress_end)
+            progress("Validating DEM elevation samples...", progress_end - 0.005)
         grid = DemGrid(bbox=bbox, rows=size, cols=size, elevations=elevations)
+        if progress:
+            progress(f"Caching DEM grid {size}x{size}...", progress_end - 0.002)
         self._store_grid(grid, provider)
+        if progress:
+            progress("DEM elevation data ready", progress_end)
         return grid
 
     def _find_cached_grid(self, bbox: BoundingBox, size: int, provider: str) -> DemGrid | None:

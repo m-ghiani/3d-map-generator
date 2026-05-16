@@ -17,11 +17,40 @@ def link_to_geomap_collection(context, obj, child_name: str) -> None:
     child.objects.link(obj)
 
 
+def clear_geomap_child_collection(child_name: str) -> int:
+    assert_main_thread()
+    root = bpy.data.collections.get("GeoMap")
+    if root is None:
+        return 0
+    child = root.children.get(child_name)
+    if child is None:
+        return 0
+
+    count = 0
+    for obj in list(child.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+        count += 1
+    return count
+
+
 def material_named(mat_name: str, color: tuple[float, float, float, float]):
     assert_main_thread()
     material = bpy.data.materials.get(mat_name) or bpy.data.materials.new(mat_name)
     material.diffuse_color = color
+    set_material_roughness(material, 1.0)
     return material
+
+
+def set_material_roughness(material, value: float = 1.0) -> None:
+    material.roughness = value
+    if not material.use_nodes or material.node_tree is None:
+        return
+    for node in material.node_tree.nodes:
+        if getattr(node, "type", None) != "BSDF_PRINCIPLED":
+            continue
+        roughness_input = node.inputs.get("Roughness")
+        if roughness_input is not None:
+            roughness_input.default_value = value
 
 
 def set_active(context, obj) -> None:

@@ -1,6 +1,6 @@
 import bpy
 
-from .blender_scene import link_to_geomap_collection, set_active
+from .blender_scene import link_to_geomap_collection, set_active, set_material_roughness
 from .mesh_builder import BboxPlaneBuilder, DemMeshBuilder
 from .models import BoundingBox, DemGrid, SatelliteTile
 from .scene_units import SceneScale, scaled_map_value
@@ -34,8 +34,10 @@ class TerrainRenderer:
                 uv_layer.data[loop_index].uv = uv_coords[mesh.loops[loop_index].vertex_index]
 
         material = bpy.data.materials.new("GeoMap_Satellite_Material")
+        set_material_roughness(material, 1.0)
         if tile.image_path and not self._apply_image_texture(material, tile.image_path):
             material.diffuse_color = (1.0, 1.0, 1.0, 1.0)
+            set_material_roughness(material, 1.0)
         obj.data.materials.append(material)
         obj["geomap_layer"] = "satellite_bbox"
 
@@ -74,6 +76,7 @@ class TerrainRenderer:
         mesh.update()
 
         material = bpy.data.materials.new("GeoMap_DEM_Material")
+        set_material_roughness(material, 1.0)
         if texture_path:
             uv_layer = mesh.uv_layers.new(name="SatelliteUV")
             uv_coords = DemMeshBuilder.uv_coords(dem_grid.rows, dem_grid.cols)
@@ -85,8 +88,10 @@ class TerrainRenderer:
 
             if not self._apply_image_texture(material, texture_path):
                 material.diffuse_color = (0.35, 0.45, 0.25, 1.0)
+                set_material_roughness(material, 1.0)
         else:
             material.diffuse_color = (0.35, 0.45, 0.25, 1.0)
+            set_material_roughness(material, 1.0)
         obj.data.materials.append(material)
         obj["geomap_layer"] = "dem"
         obj["geomap_dem_min_m"] = round(dem_grid.min_elevation(), 2)
@@ -187,4 +192,5 @@ class TerrainRenderer:
             return False
 
         material.node_tree.links.new(color_output, base_color_input)
+        set_material_roughness(material, 1.0)
         return True

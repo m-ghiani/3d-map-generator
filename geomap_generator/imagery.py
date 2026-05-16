@@ -12,7 +12,18 @@ from .exceptions import CancelledGeneration, ProviderError
 from .models import BoundingBox, SatelliteTile
 
 _ARCGIS_BASE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services"
-_BASEMAP_PROVIDERS = {"AUTO", "ARCGIS"}
+_BASEMAP_PROVIDERS = {
+    "AUTO",
+    "ARCGIS",
+    "MAPTILER",
+    "MAPBOX",
+    "GOOGLE",
+    "NASA_GIBS",
+    "SENTINEL_HUB",
+    "PLANET",
+    "MAXAR",
+    "AIRBUS",
+}
 MAP_SERVICE_PATHS: dict[str, str] = {
     "SATELLITE": "World_Imagery/MapServer",
     "STREETS": "World_Street_Map/MapServer",
@@ -26,6 +37,10 @@ _MAX_RESOLUTION = 8192
 _MAX_TILE_LAT_SPAN = 4.0
 _MAX_TILE_LON_SPAN = 4.0
 _MAX_EXPORT_RESOLUTION = 2048
+_PROVIDER_MAX_EXPORT_RESOLUTION = {
+    "MAPBOX": 1280,
+    "GOOGLE": 640,
+}
 _WEB_MERCATOR_RADIUS_M = 6378137.0
 _WEB_MERCATOR_MAX_LAT = 85.05112878
 _MIN_RESOLUTION = 256
@@ -94,6 +109,24 @@ def _image_size_for_bbox(
     return width_px, height_px, (min_x, min_y, max_x, max_y)
 
 
+def _required_token(tokens: dict[str, str], name: str, provider: str) -> str:
+    token = tokens.get(name) or ""
+    if not token:
+        raise ProviderError(f"{provider} requires an API token in addon preferences.")
+    return token
+
+
+def _static_zoom_for_bbox(bbox: BoundingBox) -> int:
+    span = max(abs(bbox.lat_span()), abs(bbox.lon_span()), 1e-9)
+    zoom = round(math.log2(360.0 / span))
+    return max(1, min(20, zoom))
+
+
+def _provider_max_export_resolution(provider: str) -> int:
+    provider = "ARCGIS" if provider == "AUTO" else provider
+    return _PROVIDER_MAX_EXPORT_RESOLUTION.get(provider, _MAX_EXPORT_RESOLUTION)
+
+
 class SatelliteImageryClient:
     """Downloads a satellite image for a geographic bounding box."""
 
@@ -106,6 +139,7 @@ class SatelliteImageryClient:
         resolution: int,
         map_style: str = "SATELLITE",
         provider: str = "AUTO",
+        tokens: dict[str, str] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> list[SatelliteTile]:
         if provider not in _BASEMAP_PROVIDERS:
@@ -121,9 +155,13 @@ class SatelliteImageryClient:
                 bbox=tile_bbox,
                 image_path=self.fetch_bbox_image(
                     tile_bbox,
-                    min(resolution, _MAX_EXPORT_RESOLUTION),
+                    min(
+                        resolution,
+                        _provider_max_export_resolution(provider),
+                    ),
                     map_style=map_style,
                     provider=provider,
+                    tokens=tokens,
                     should_cancel=should_cancel,
                     suffix=f"_{index:03d}",
                 ),
@@ -161,6 +199,7 @@ class SatelliteImageryClient:
         resolution: int,
         map_style: str = "SATELLITE",
         provider: str = "AUTO",
+        tokens: dict[str, str] | None = None,
         should_cancel: Callable[[], bool] | None = None,
         suffix: str = "",
     ) -> Path:
@@ -171,24 +210,18 @@ class SatelliteImageryClient:
         if cached_path:
             return cached_path
 
-        width_px, height_px, mercator_bbox = _image_size_for_bbox(
-            bbox, min(resolution, _MAX_EXPORT_RESOLUTION)
-        )
+        export_resolution = min(resolution, _provider_max_export_resolution(provider))
+        width_px, height_px, mercator_bbox = _image_size_for_bbox(bbox, export_resolution)
         min_x, min_y, max_x, max_y = mercator_bbox
-        params = urllib.parse.urlencode(
-            {
-                "bbox": f"{min_x},{min_y},{max_x},{max_y}",
-                "bboxSR": "3857",
-                "imageSR": "3857",
-                "size": f"{width_px},{height_px}",
-                "format": "png",
-                "transparent": "false",
-                "adjustAspectRatio": "false",
-                "f": "image",
-            }
+        url = self._build_imagery_url(
+            bbox,
+            width_px,
+            height_px,
+            mercator_bbox,
+            map_style,
+            provider,
+            tokens or {},
         )
-        service_path = MAP_SERVICE_PATHS.get(map_style, MAP_SERVICE_PATHS["SATELLITE"])
-        url = f"{_ARCGIS_BASE_URL}/{service_path}/export?{params}"
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
 
         def fetch() -> bytes:
@@ -205,6 +238,95 @@ class SatelliteImageryClient:
         output.write_bytes(image_bytes)
         self._store_image_index(bbox, resolution, map_style, provider, output)
         return output
+
+    @staticmethod
+    def _build_imagery_url(
+        bbox: BoundingBox,
+        width_px: int,
+        height_px: int,
+        mercator_bbox: tuple[float, float, float, float],
+        map_style: str,
+        provider: str,
+        tokens: dict[str, str],
+    ) -> str:
+        provider = "ARCGIS" if provider == "AUTO" else provider
+        if provider == "ARCGIS":
+            min_x, min_y, max_x, max_y = mercator_bbox
+            params = urllib.parse.urlencode(
+                {
+                    "bbox": f"{min_x},{min_y},{max_x},{max_y}",
+                    "bboxSR": "3857",
+                    "imageSR": "3857",
+                    "size": f"{width_px},{height_px}",
+                    "format": "png",
+                    "transparent": "false",
+                    "adjustAspectRatio": "false",
+                    "f": "image",
+                }
+            )
+            service_path = MAP_SERVICE_PATHS.get(map_style, MAP_SERVICE_PATHS["SATELLITE"])
+            return f"{_ARCGIS_BASE_URL}/{service_path}/export?{params}"
+        if provider == "MAPBOX":
+            token = _required_token(tokens, "mapbox", provider)
+            params = urllib.parse.urlencode({"access_token": token})
+            bbox_expr = urllib.parse.quote(
+                f"[{bbox.min_lon},{bbox.min_lat},{bbox.max_lon},{bbox.max_lat}]",
+                safe="[],.-",
+            )
+            return (
+                "https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static/"
+                f"{bbox_expr}"
+                f"/{width_px}x{height_px}?{params}"
+            )
+        if provider == "MAPTILER":
+            token = _required_token(tokens, "maptiler", provider)
+            center_lat = (bbox.min_lat + bbox.max_lat) / 2
+            center_lon = (bbox.min_lon + bbox.max_lon) / 2
+            zoom = _static_zoom_for_bbox(bbox)
+            params = urllib.parse.urlencode({"key": token})
+            return (
+                "https://api.maptiler.com/maps/satellite/static/"
+                f"{center_lon},{center_lat},{zoom}/{width_px}x{height_px}.png?{params}"
+            )
+        if provider == "GOOGLE":
+            token = _required_token(tokens, "google", provider)
+            center_lat = (bbox.min_lat + bbox.max_lat) / 2
+            center_lon = (bbox.min_lon + bbox.max_lon) / 2
+            zoom = _static_zoom_for_bbox(bbox)
+            params = urllib.parse.urlencode(
+                {
+                    "center": f"{center_lat},{center_lon}",
+                    "zoom": str(zoom),
+                    "size": f"{min(width_px, 640)}x{min(height_px, 640)}",
+                    "maptype": "satellite",
+                    "format": "png",
+                    "key": token,
+                }
+            )
+            return f"https://maps.googleapis.com/maps/api/staticmap?{params}"
+        if provider == "NASA_GIBS":
+            params = urllib.parse.urlencode(
+                {
+                    "SERVICE": "WMS",
+                    "REQUEST": "GetMap",
+                    "VERSION": "1.3.0",
+                    "LAYERS": "MODIS_Terra_CorrectedReflectance_TrueColor",
+                    "CRS": "EPSG:4326",
+                    "BBOX": f"{bbox.min_lat},{bbox.min_lon},{bbox.max_lat},{bbox.max_lon}",
+                    "WIDTH": str(width_px),
+                    "HEIGHT": str(height_px),
+                    "FORMAT": "image/png",
+                    "TRANSPARENT": "false",
+                }
+            )
+            return f"https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?{params}"
+        if provider in {"SENTINEL_HUB", "PLANET", "MAXAR", "AIRBUS"}:
+            _required_token(tokens, provider.lower(), provider)
+            raise ProviderError(
+                f"{provider} requires account-specific imagery endpoint configuration "
+                "before it can be used as a basemap provider."
+            )
+        raise ProviderError(f"Unsupported map imagery provider: {provider}")
 
     @staticmethod
     def _image_output_path(

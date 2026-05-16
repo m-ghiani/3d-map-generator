@@ -1,0 +1,30 @@
+{
+  "MAPTILER": [
+    "Create a MapTiler account, open Account > API keys, then copy a key with Maps access.",
+    "MapTiler Satellite uses this key in the Static Maps API."
+  ],
+  "MAPBOX": [
+    "Create a Mapbox account, open Tokens, then copy a public access token with Styles/Static Images access.",
+    "The default public token is usually enough for Mapbox Satellite static imagery."
+  ],
+  "GOOGLE": [
+    "Create or open a Google Cloud project, enable Maps Static API, then create an API key.",
+    "Restrict the key to the Maps Static API and your allowed environments when possible."
+  ],
+  "SENTINEL_HUB": [
+    "Create a Sentinel Hub account and OAuth client, then provide a valid access token.",
+    "This addon also needs account-specific endpoint configuration before Sentinel Hub can be used as a basemap."
+  ],
+  "PLANET": [
+    "Create a Planet account, open Account settings, then copy your API key.",
+    "Planet requires account-specific imagery endpoint configuration before it can be used as a basemap."
+  ],
+  "MAXAR": [
+    "Use your Maxar developer or enterprise portal to generate an access token.",
+    "Maxar requires account-specific imagery endpoint configuration before it can be used as a basemap."
+  ],
+  "AIRBUS": [
+    "Use your Airbus OneAtlas account or enterprise portal to generate an API token.",
+    "Airbus requires account-specific imagery endpoint configuration before it can be used as a basemap."
+  ]
+}

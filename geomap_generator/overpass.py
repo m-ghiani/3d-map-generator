@@ -227,6 +227,7 @@ class OsmApiClient:
         coastlines: bool = False,
         rivers: bool = False,
         roads: bool = False,
+        buildings: bool = False,
         admin_level: str | None = None,
         cities: bool = False,
         poi_historic: bool = False,
@@ -248,6 +249,7 @@ class OsmApiClient:
                 coastlines=coastlines,
                 rivers=rivers,
                 roads=roads,
+                buildings=buildings,
                 admin_level=admin_level,
                 cities=cities,
                 poi_historic=poi_historic,
@@ -264,6 +266,7 @@ class OsmApiClient:
             coastlines=coastlines,
             rivers=rivers,
             roads=roads,
+            buildings=buildings,
             admin_level=admin_level,
             cities=cities,
             poi_historic=poi_historic,
@@ -283,6 +286,7 @@ class OsmApiClient:
         coastlines: bool,
         rivers: bool,
         roads: bool,
+        buildings: bool,
         admin_level: str | None,
         cities: bool,
         poi_historic: bool,
@@ -306,6 +310,7 @@ class OsmApiClient:
                 coastlines=coastlines,
                 rivers=rivers,
                 roads=roads,
+                buildings=buildings,
                 admin_level=admin_level,
                 cities=cities,
                 poi_historic=poi_historic,
@@ -336,6 +341,7 @@ class OsmApiClient:
         coastlines: bool = False,
         rivers: bool = False,
         roads: bool = False,
+        buildings: bool = False,
         admin_level: str | None = None,
         cities: bool = False,
         poi_historic: bool = False,
@@ -352,6 +358,7 @@ class OsmApiClient:
             coastlines=coastlines,
             rivers=rivers,
             roads=roads,
+            buildings=buildings,
             admin_level=admin_level,
             cities=cities,
             poi_historic=poi_historic,
@@ -432,6 +439,7 @@ class OsmApiClient:
         coastlines: bool = False,
         rivers: bool = False,
         roads: bool = False,
+        buildings: bool = False,
         admin_level: str | None = None,
         cities: bool = False,
         poi_historic: bool = False,
@@ -448,6 +456,8 @@ class OsmApiClient:
             filters.append(f'way["waterway"~"^(river|stream|canal)$"]({bbox_expr});')
         if roads:
             filters.append(f'way["highway"~"^(motorway|trunk|primary)$"]({bbox_expr});')
+        if buildings:
+            filters.append(f'way["building"]({bbox_expr});')
         if admin_level == "ALL":
             filters.append(
                 f'way["boundary"="administrative"]["admin_level"~"^(2|4|6|8)$"]({bbox_expr});'

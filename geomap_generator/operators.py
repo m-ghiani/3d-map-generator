@@ -1,9 +1,12 @@
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
-from bpy.props import IntProperty, StringProperty
+from bpy.props import EnumProperty, IntProperty, StringProperty
 from bpy.types import Operator
 
 from .annotation_renderer import AnnotationRenderer
+from .blender_scene import clear_geomap_child_collection
 from .dem import DemClient
 from .download_cache import cache_stats, clear_cache, configure_blender_cache_root
 from .exceptions import (
@@ -13,6 +16,7 @@ from .exceptions import (
     ProviderError,
     ValidationError,
 )
+from .geometry_payload import build_building_batch_payload, build_vector_payload
 from .imagery import SatelliteImageryClient
 from .layer_style import vector_layer_identity
 from .mesh_builder import DemHeightSampler
@@ -29,7 +33,8 @@ from .search_cache import (
     load_history,
     snapshot_from_props,
 )
-from .scene_units import SceneScale
+from .scene_units import SceneScale, scaled_map_value
+from .service_client import GeoMapServiceClient
 from .settings import (
     GenerationSettings,
     ProviderSettings,
@@ -48,6 +53,11 @@ class GeoMapGenerateOperator(Operator):
     bl_description = "Generate 3D map from geographic data"
 
     _timer = None
+    _POINT_BATCH_SIZE = 200
+    _BUILDING_BATCH_SIZE = 5000
+    _BUILDING_VERTEX_CHUNK_LIMIT = 120_000
+    _MESH_PROGRESS_START = 0.82
+    _MESH_PROGRESS_END = 0.995
 
     def execute(self, context):
         tracker = ProgressTracker.get_instance()
@@ -78,6 +88,7 @@ class GeoMapGenerateOperator(Operator):
         self._satellite_tiles: list[SatelliteTile] = []
         self._dem_grid: DemGrid | None = None
         self._dem_tiles: list[tuple[SatelliteTile, DemGrid]] = []
+        self._mesh_steps = None
 
         thread = threading.Thread(target=self._generate_threaded, daemon=True)
         thread.start()
@@ -91,6 +102,7 @@ class GeoMapGenerateOperator(Operator):
         tracker = ProgressTracker.get_instance()
 
         if event.type == "TIMER":
+            advanced_mesh_this_tick = False
             for area in context.screen.areas:
                 if area.type == "VIEW_3D":
                     for region in area.regions:
@@ -100,7 +112,26 @@ class GeoMapGenerateOperator(Operator):
             mesh_data = tracker.pop_mesh_data()
             if mesh_data is not None:
                 osm_data, props = mesh_data
-                self._create_mesh(context, osm_data, props, tracker)
+                ready_at = tracker.mesh_data_ready_at
+                wait_seconds = time.time() - ready_at if ready_at else 0.0
+                tracker.log(
+                    "Blender main thread picked up mesh data "
+                    f"after {wait_seconds:.1f}s "
+                    f"({len(osm_data.ways)} ways, {len(osm_data.points)} points)"
+                )
+                self._start_mesh_creation(context, osm_data, props, tracker)
+                advanced_mesh_this_tick = True
+            elif tracker.should_log_pending_mesh_data():
+                age = tracker.mesh_data_pending_age()
+                if age is not None:
+                    tracker.log(f"Mesh data still waiting for Blender main thread ({age:.1f}s)")
+
+            if (
+                self._mesh_steps is not None
+                and tracker.is_running
+                and not advanced_mesh_this_tick
+            ):
+                self._advance_mesh_creation(tracker)
 
             if not tracker.is_running:
                 self._remove_timer(context)
@@ -141,10 +172,10 @@ class GeoMapGenerateOperator(Operator):
 
             tracker.log(f"✓ {len(osm_data.ways)} ways received")
             add_search(self._search_snapshot)
-            tracker.set_status("Preparing mesh creation...", 0.84)
+            tracker.set_status("Preparing mesh creation payload...", 0.82)
             tracker.set_mesh_data((osm_data, self._props))
             tracker.log("✓ Mesh data ready")
-            tracker.set_status("Waiting for Blender main thread...", 0.85)
+            tracker.set_status("Waiting for Blender main thread...", 0.83)
 
         except CancelledGeneration as e:
             tracker.log(f"⊘ {e}")
@@ -160,6 +191,9 @@ class GeoMapGenerateOperator(Operator):
 
     def _fetch_data(self, tracker: ProgressTracker) -> GeoMapData:
         props = self._props
+        if self._prefs.data_backend == "EXTERNAL":
+            return self._fetch_external_data(tracker)
+
         self._raise_if_cancelled(tracker)
         if props.input_mode == "COUNTRY":
             tracker.set_status("Resolving place bounding box...", 0.12)
@@ -193,6 +227,8 @@ class GeoMapGenerateOperator(Operator):
             selected.append("roads")
         if props.import_admin:
             selected.append(f"admin boundaries level {props.admin_level}")
+        if props.import_buildings:
+            selected.append("3D buildings")
         if props.import_cities:
             selected.append("cities")
         if props.import_poi_historic:
@@ -224,6 +260,7 @@ class GeoMapGenerateOperator(Operator):
                 props.satellite_resolution,
                 props.map_style,
                 provider=self._provider("basemap_provider"),
+                tokens=self._basemap_tokens(),
                 should_cancel=tracker.is_cancelled,
             )
             self._raise_if_cancelled(tracker)
@@ -272,6 +309,24 @@ class GeoMapGenerateOperator(Operator):
         tracker.set_status("Geographic data fetched", 0.83)
         return data
 
+    def _fetch_external_data(self, tracker: ProgressTracker) -> GeoMapData:
+        self._raise_if_cancelled(tracker)
+        tracker.set_status("Calling external GeoMap service...", 0.18)
+        tracker.log(f"External data service: {self._prefs.service_url}")
+        result = GeoMapServiceClient(
+            self._prefs.service_url,
+            auto_start=self._prefs.service_auto_start,
+            port=self._prefs.service_port,
+        ).generate(self._props, self._prefs)
+        self._raise_if_cancelled(tracker)
+        for line in result.logs:
+            tracker.log(f"service: {line}")
+        self._satellite_tiles = result.satellite_tiles
+        self._dem_grid = result.dem_grid
+        self._dem_tiles = result.dem_tiles
+        tracker.set_status("External geographic data fetched", 0.83)
+        return result.osm_data
+
     @staticmethod
     def _raise_if_cancelled(tracker: ProgressTracker) -> None:
         if tracker.is_cancelled():
@@ -287,6 +342,7 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": True,
                     "rivers": False,
                     "roads": False,
+                    "buildings": False,
                     "admin_level": None,
                     "cities": False,
                     "poi_historic": False,
@@ -303,6 +359,7 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": False,
                     "rivers": True,
                     "roads": False,
+                    "buildings": False,
                     "admin_level": None,
                     "cities": False,
                     "poi_historic": False,
@@ -319,6 +376,7 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": False,
                     "rivers": False,
                     "roads": True,
+                    "buildings": False,
                     "admin_level": None,
                     "cities": False,
                     "poi_historic": False,
@@ -335,7 +393,25 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": False,
                     "rivers": False,
                     "roads": False,
+                    "buildings": False,
                     "admin_level": props.admin_level,
+                    "cities": False,
+                    "poi_historic": False,
+                    "poi_cultural": False,
+                    "poi_administrative": False,
+                    "poi_natural": False,
+                }
+            )
+        if props.import_buildings:
+            requests.append(
+                {
+                    "label": "3D buildings",
+                    "provider": self._provider("road_provider"),
+                    "coastlines": False,
+                    "rivers": False,
+                    "roads": False,
+                    "buildings": True,
+                    "admin_level": None,
                     "cities": False,
                     "poi_historic": False,
                     "poi_cultural": False,
@@ -351,6 +427,7 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": False,
                     "rivers": False,
                     "roads": False,
+                    "buildings": False,
                     "admin_level": None,
                     "cities": True,
                     "poi_historic": False,
@@ -367,6 +444,7 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": False,
                     "rivers": False,
                     "roads": False,
+                    "buildings": False,
                     "admin_level": None,
                     "cities": False,
                     "poi_historic": True,
@@ -383,6 +461,7 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": False,
                     "rivers": False,
                     "roads": False,
+                    "buildings": False,
                     "admin_level": None,
                     "cities": False,
                     "poi_historic": False,
@@ -399,6 +478,7 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": False,
                     "rivers": False,
                     "roads": False,
+                    "buildings": False,
                     "admin_level": None,
                     "cities": False,
                     "poi_historic": False,
@@ -415,6 +495,7 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": False,
                     "rivers": False,
                     "roads": False,
+                    "buildings": False,
                     "admin_level": None,
                     "cities": False,
                     "poi_historic": False,
@@ -433,6 +514,7 @@ class GeoMapGenerateOperator(Operator):
                     "coastlines": False,
                     "rivers": False,
                     "roads": False,
+                    "buildings": False,
                     "admin_level": None,
                     "cities": False,
                     "poi_historic": False,
@@ -444,6 +526,7 @@ class GeoMapGenerateOperator(Operator):
             grouped[provider]["coastlines"] |= request["coastlines"]
             grouped[provider]["rivers"] |= request["rivers"]
             grouped[provider]["roads"] |= request["roads"]
+            grouped[provider]["buildings"] |= request["buildings"]
             if request["admin_level"]:
                 grouped[provider]["admin_level"] = request["admin_level"]
             grouped[provider]["cities"] |= request["cities"]
@@ -465,6 +548,7 @@ class GeoMapGenerateOperator(Operator):
                 coastlines=request["coastlines"],
                 rivers=request["rivers"],
                 roads=request["roads"],
+                buildings=request["buildings"],
                 admin_level=request["admin_level"],
                 cities=request["cities"],
                 poi_historic=request["poi_historic"],
@@ -504,26 +588,111 @@ class GeoMapGenerateOperator(Operator):
     def _provider(self, name: str) -> str:
         return getattr(self._prefs, name, "AUTO") if self._prefs else "AUTO"
 
-    def _create_mesh(self, context, osm_data: GeoMapData, props, tracker: ProgressTracker) -> None:
+    def _basemap_tokens(self, prefs: ProviderSettings | None = None) -> dict[str, str]:
+        prefs = prefs or getattr(self, "_prefs", None)
+        if prefs is None:
+            return {}
+        return {
+            "maptiler": prefs.maptiler_token,
+            "mapbox": prefs.mapbox_token,
+            "google": prefs.google_token,
+            "sentinel_hub": prefs.sentinel_hub_token,
+            "planet": prefs.planet_token,
+            "maxar": prefs.maxar_token,
+            "airbus": prefs.airbus_token,
+        }
+
+    def _start_mesh_creation(
+        self,
+        context,
+        osm_data: GeoMapData,
+        props,
+        tracker: ProgressTracker,
+    ) -> None:
         try:
-            assert_main_thread()
+            self._mesh_steps = self._mesh_creation_steps(context, osm_data, props, tracker)
+            self._advance_mesh_creation(tracker)
+        except Exception as e:
+            self._mesh_steps = None
+            tracker.error = f"Mesh creation failed: {e}"
+            tracker.log(f"✗ Mesh error: {e}")
+            tracker.is_running = False
+
+    def _advance_mesh_creation(self, tracker: ProgressTracker) -> None:
+        if self._mesh_steps is None:
+            return
+        try:
+            next(self._mesh_steps)
+        except StopIteration:
+            self._mesh_steps = None
+        except Exception as e:
+            self._mesh_steps = None
+            tracker.error = f"Mesh creation failed: {e}"
+            tracker.log(f"✗ Mesh error: {e}")
+            tracker.is_running = False
+
+    def _mesh_creation_steps(
+        self,
+        context,
+        osm_data: GeoMapData,
+        props,
+        tracker: ProgressTracker,
+    ):
+        started_at = time.time()
+        executor = ThreadPoolExecutor(max_workers=1)
+        assert_main_thread()
+        try:
             self._raise_if_cancelled(tracker)
+            tracker.set_status("Starting Blender mesh creation...", self._MESH_PROGRESS_START)
+            tracker.log("Incremental mesh creation started on Blender main thread")
+            phase_at = time.time()
             scene_scale = SceneScale.from_scene(
                 context.scene, osm_data.bbox, props.detail_level, props.dem_height_scale
             )
+            tracker.log(f"Scene scale ready in {time.time() - phase_at:.2f}s")
+            tracker.log(
+                f"DEM height scale: {scene_scale.dem_height_scale:.6f} BU/m "
+                f"(UI value {props.dem_height_scale:.6f})"
+            )
+            tracker.set_status("Scene scale ready", 0.835)
+            yield
+
             terrain_renderer = TerrainRenderer()
             if props.import_satellite and not props.import_relief:
-                tracker.set_status("Creating satellite bounding box...", 0.86)
                 for index, tile in enumerate(self._satellite_tiles, start=1):
+                    self._raise_if_cancelled(tracker)
+                    tracker.set_status(
+                        f"Creating satellite bounding box {index}/{len(self._satellite_tiles)}",
+                        0.84,
+                    )
+                    phase_at = time.time()
+                    tracker.log(
+                        f"Creating satellite bounding box {index}/{len(self._satellite_tiles)}"
+                    )
                     terrain_renderer.create_satellite_bbox(
                         context, tile, osm_data.bbox, props, index
                     )
+                    tracker.log(
+                        f"Satellite bounding box {index}/{len(self._satellite_tiles)} "
+                        f"created in {time.time() - phase_at:.2f}s"
+                    )
+                    yield
 
             if props.import_relief and self._dem_tiles:
-                tracker.set_status("Creating textured DEM terrain tiles...", 0.88)
                 dem_height_scale = scene_scale.dem_height_scale
                 dem_min = min(grid.min_elevation() for _tile, grid in self._dem_tiles)
                 for index, (tile, dem_grid) in enumerate(self._dem_tiles, start=1):
+                    self._raise_if_cancelled(tracker)
+                    tracker.set_status(
+                        f"Building DEM terrain tile {index}/{len(self._dem_tiles)} "
+                        f"({dem_grid.rows}x{dem_grid.cols})",
+                        0.84,
+                    )
+                    tile_at = time.time()
+                    tracker.log(
+                        f"Creating DEM terrain tile {index}/{len(self._dem_tiles)} "
+                        f"({dem_grid.rows}x{dem_grid.cols})"
+                    )
                     terrain_renderer.create_dem_mesh(
                         context,
                         dem_grid,
@@ -535,13 +704,24 @@ class GeoMapGenerateOperator(Operator):
                         suffix=f"_{index:03d}",
                         min_elevation_override=dem_min,
                     )
+                    tracker.log(
+                        f"DEM terrain tile {index}/{len(self._dem_tiles)} created "
+                        f"in {time.time() - tile_at:.2f}s"
+                    )
+                    yield
             elif props.import_relief and self._dem_grid:
                 status = (
                     "Creating textured DEM terrain mesh..."
                     if props.import_satellite
                     else "Creating DEM terrain mesh..."
                 )
-                tracker.set_status(status, 0.88)
+                tracker.set_status(f"{status} ({self._dem_grid.rows}x{self._dem_grid.cols})", 0.84)
+                self._raise_if_cancelled(tracker)
+                phase_at = time.time()
+                tracker.log(
+                    f"Creating DEM terrain mesh "
+                    f"({self._dem_grid.rows}x{self._dem_grid.cols})"
+                )
                 texture_path = (
                     self._satellite_tiles[0].image_path if self._satellite_tiles else None
                 )
@@ -554,46 +734,260 @@ class GeoMapGenerateOperator(Operator):
                     texture_path=texture_path,
                     projection_bbox=osm_data.bbox,
                 )
+                tracker.log(f"DEM terrain mesh created in {time.time() - phase_at:.2f}s")
+                yield
 
-            tracker.set_status("Projecting coordinates...", 0.90)
+            tracker.set_status("Splitting data into mesh tasks...", 0.86)
+            phase_at = time.time()
             dem_sampler = self._create_dem_sampler(scene_scale, props)
-            vector_layers = self._split_vector_layers(osm_data)
+            building_ways, vector_ways = self._split_building_ways(osm_data, props)
+            vector_data = GeoMapData(ways=vector_ways, bbox=osm_data.bbox, points=osm_data.points)
+            vector_layers = self._split_vector_layers(vector_data)
+            points = self._unique_points(osm_data.points)
+            estimated_buildings = (
+                len([way for way in building_ways if len(way.geometry) >= 4])
+                if props.import_buildings
+                else 0
+            )
+            total_steps = self._mesh_progress_total_steps(
+                satellite_count=len(self._satellite_tiles)
+                if props.import_satellite and not props.import_relief
+                else 0,
+                dem_tile_count=len(self._dem_tiles) if props.import_relief else 0,
+                has_single_dem=bool(props.import_relief and self._dem_grid and not self._dem_tiles),
+                vector_layer_count=len(vector_layers),
+                point_count=len(points),
+                building_count=estimated_buildings,
+            )
+            completed_steps = 1
+            tracker.log(
+                "Projected data split in "
+                f"{time.time() - phase_at:.2f}s "
+                f"({len(vector_ways)} vector ways, {len(building_ways)} building ways, "
+                f"{len(points)} points, {len(vector_layers)} layers, "
+                f"{total_steps} mesh tasks)"
+            )
+            tracker.set_status(
+                "Mesh plan ready: "
+                f"{len(vector_layers)} layers, {len(points)} POI, {estimated_buildings} buildings",
+                self._mesh_progress(completed_steps, total_steps),
+            )
+            yield
+
             vector_objects = []
-            if not vector_layers and not osm_data.points and not (
+            building_objects = []
+            point_objects = []
+            if not vector_layers and not building_ways and not osm_data.points and not (
                 props.import_satellite or props.import_relief
             ):
                 raise MeshBuildError(
                     "Mesh builder returned no vertices — ways may have no usable geometry."
                 )
-            if not vector_layers and not osm_data.points:
+            if not vector_layers and not building_ways and not osm_data.points:
                 tracker.log("No vector ways returned; non-vector layers created")
                 tracker.result = True
                 tracker.set_status("Completed", 1.0)
-                return None
+                tracker.is_running = False
+                return
 
-            tracker.set_status("Creating separated vector objects...", 0.93)
             vector_renderer = VectorRenderer()
-            vector_objects = vector_renderer.render_layers(
-                context, vector_layers, props, dem_sampler, scene_scale
-            )
-            point_objects = vector_renderer.render_points(
-                context, osm_data, props, dem_sampler, scene_scale
-            )
+            for index, (layer_key, layer_name, layer_data) in enumerate(vector_layers, start=1):
+                self._raise_if_cancelled(tracker)
+                tracker.set_status(
+                    f"Preparing vector payload {index}/{len(vector_layers)}: "
+                    f"{layer_name} ({len(layer_data.ways)} ways)",
+                    self._mesh_progress(completed_steps, total_steps),
+                )
+                phase_at = time.time()
+                tracker.log(
+                    f"Preparing vector payload {index}/{len(vector_layers)}: "
+                    f"{layer_name} ({len(layer_data.ways)} ways)"
+                )
+                future = executor.submit(
+                    build_vector_payload,
+                    layer_key,
+                    layer_name,
+                    layer_data,
+                    props,
+                    dem_sampler,
+                    scene_scale,
+                )
+                while not future.done():
+                    self._raise_if_cancelled(tracker)
+                    yield
+                payload = future.result()
+                completed_steps += 1
+                tracker.log(
+                    f"Vector payload {index}/{len(vector_layers)} prepared "
+                    f"in {time.time() - phase_at:.2f}s"
+                )
+                tracker.set_status(
+                    f"Prepared vector payload {index}/{len(vector_layers)}",
+                    self._mesh_progress(completed_steps, total_steps),
+                )
+                yield
+                if payload is None:
+                    completed_steps += 1
+                    tracker.set_status(
+                        f"Skipped empty vector layer {index}/{len(vector_layers)}",
+                        self._mesh_progress(completed_steps, total_steps),
+                    )
+                    continue
+                tracker.set_status(
+                    f"Committing vector layer {index}/{len(vector_layers)}: {layer_name}",
+                    self._mesh_progress(completed_steps, total_steps),
+                )
+                commit_at = time.time()
+                vector_obj = vector_renderer.commit_payload(
+                    context,
+                    payload,
+                    active=len(vector_objects) == 0,
+                )
+                if vector_obj:
+                    vector_objects.append(vector_obj)
+                tracker.log(
+                    f"Vector layer {index}/{len(vector_layers)} committed "
+                    f"in {time.time() - commit_at:.2f}s"
+                )
+                completed_steps += 1
+                tracker.set_status(
+                    f"Committed vector layer {index}/{len(vector_layers)}",
+                    self._mesh_progress(completed_steps, total_steps),
+                )
+                yield
 
-            if not vector_objects and not point_objects and not (
+            if points:
+                for start in range(0, len(points), self._POINT_BATCH_SIZE):
+                    self._raise_if_cancelled(tracker)
+                    end = min(start + self._POINT_BATCH_SIZE, len(points))
+                    tracker.set_status(
+                        f"Creating POI batch {start + 1}-{end}/{len(points)}",
+                        self._mesh_progress(completed_steps, total_steps),
+                    )
+                    phase_at = time.time()
+                    batch_data = GeoMapData(
+                        ways=[],
+                        bbox=osm_data.bbox,
+                        points=points[start:end],
+                    )
+                    point_objects.extend(
+                        vector_renderer.render_points(
+                            context, batch_data, props, dem_sampler, scene_scale
+                        )
+                    )
+                    tracker.log(
+                        f"POI batch {start + 1}-{end}/{len(points)} created "
+                        f"in {time.time() - phase_at:.2f}s"
+                    )
+                    completed_steps += 1
+                    tracker.set_status(
+                        f"Created POI {end}/{len(points)}",
+                        self._mesh_progress(completed_steps, total_steps),
+                    )
+                    yield
+
+            if props.import_buildings and building_ways:
+                self._raise_if_cancelled(tracker)
+                phase_at = time.time()
+                buildings = Osm3DModelClient().buildings_from_ways(building_ways)
+                building_chunks = self._building_chunks(buildings)
+                total_steps = self._mesh_progress_total_steps(
+                    satellite_count=len(self._satellite_tiles)
+                    if props.import_satellite and not props.import_relief
+                    else 0,
+                    dem_tile_count=len(self._dem_tiles) if props.import_relief else 0,
+                    has_single_dem=bool(props.import_relief and self._dem_grid and not self._dem_tiles),
+                    vector_layer_count=len(vector_layers),
+                    point_count=len(points),
+                    building_chunk_count=len(building_chunks),
+                )
+                tracker.log(
+                    f"Prepared {len(buildings)} 3D building footprints "
+                    f"as {len(building_chunks)} merged mesh chunk(s) "
+                    f"in {time.time() - phase_at:.2f}s"
+                )
+                tracker.set_status(
+                    f"Prepared {len(buildings)} building footprints for merged mesh",
+                    self._mesh_progress(completed_steps, total_steps),
+                )
+                yield
+
+                renderer = Osm3DModelRenderer()
+                z_offset = scaled_map_value(props.vector_z_offset, scene_scale)
+                for chunk_index, batch in enumerate(building_chunks, start=1):
+                    self._raise_if_cancelled(tracker)
+                    tracker.set_status(
+                        f"Preparing merged 3D buildings mesh {chunk_index}/{len(building_chunks)}",
+                        self._mesh_progress(completed_steps, total_steps),
+                    )
+                    phase_at = time.time()
+                    future = executor.submit(
+                        self._build_building_payloads,
+                        batch,
+                        osm_data.bbox,
+                        props,
+                        dem_sampler,
+                        scene_scale,
+                        z_offset,
+                        name=self._building_chunk_name(chunk_index, len(building_chunks)),
+                    )
+                    while not future.done():
+                        self._raise_if_cancelled(tracker)
+                        yield
+                    payload = future.result()
+                    completed_steps += 1
+                    tracker.log(
+                        f"Merged 3D buildings payload {chunk_index}/{len(building_chunks)} "
+                        f"prepared in {time.time() - phase_at:.2f}s"
+                    )
+                    tracker.set_status(
+                        f"Prepared merged 3D buildings mesh {chunk_index}/{len(building_chunks)}",
+                        self._mesh_progress(completed_steps, total_steps),
+                    )
+                    yield
+                    tracker.set_status(
+                        f"Committing merged 3D buildings mesh {chunk_index}/{len(building_chunks)}",
+                        self._mesh_progress(completed_steps, total_steps),
+                    )
+                    commit_at = time.time()
+                    obj = renderer.commit_batch_payload(
+                        context,
+                        payload,
+                        batch_index=chunk_index,
+                    )
+                    if obj:
+                        building_objects.append(obj)
+                    tracker.log(
+                        f"Merged 3D buildings mesh {chunk_index}/{len(building_chunks)} committed "
+                        f"with {payload.building_count} simplified buildings "
+                        f"in {time.time() - commit_at:.2f}s"
+                    )
+                    completed_steps += 1
+                    tracker.set_status(
+                        f"Committed merged 3D buildings mesh "
+                        f"{chunk_index}/{len(building_chunks)}",
+                        self._mesh_progress(completed_steps, total_steps),
+                    )
+                    yield
+
+            if not vector_objects and not point_objects and not building_objects and not (
                 props.import_satellite or props.import_relief
             ):
                 raise MeshBuildError(
                     "Mesh builder returned no vertices — ways may have no usable geometry."
                 )
-            if not vector_objects and not point_objects:
+            if not vector_objects and not point_objects and not building_objects:
                 tracker.log("Selected vector layers produced no usable geometry")
                 tracker.result = True
                 tracker.set_status("Completed", 1.0)
-                return None
+                tracker.is_running = False
+                return
 
-            tracker.set_status("Annotating map scale...", 0.98)
-            # Real-world scale annotation
+            tracker.set_status(
+                "Annotating map scale and writing metadata...",
+                self._mesh_progress(completed_steps, total_steps),
+            )
+            phase_at = time.time()
             tracker.log(
                 f"Scene: {scene_scale.unit_system} "
                 f"(scale_length={scene_scale.scale_length:.4f} {scene_scale.unit_label}/BU)"
@@ -604,7 +998,7 @@ class GeoMapGenerateOperator(Operator):
             )
             tracker.log(f"Scale: 1 BU ≈ {scene_scale.km_per_bu:.2f} km")
 
-            for obj in [*vector_objects, *point_objects]:
+            for obj in [*vector_objects, *point_objects, *building_objects]:
                 obj["geomap_km_per_bu"] = round(scene_scale.km_per_bu, 4)
                 obj["geomap_extent_km"] = (
                     f"{scene_scale.extent_lat_km:.1f} × {scene_scale.extent_lon_km:.1f}"
@@ -614,18 +1008,183 @@ class GeoMapGenerateOperator(Operator):
             AnnotationRenderer().render(
                 context, osm_data.bbox, props, vector_objects, scene_scale
             )
+            tracker.log(f"Annotations created in {time.time() - phase_at:.2f}s")
+            completed_steps += 1
+            tracker.set_status(
+                "Annotations complete",
+                self._mesh_progress(completed_steps, total_steps),
+            )
+            yield
 
             tracker.log(
-                f"Vector layers: {len(vector_objects)} objects, POI empties: {len(point_objects)}"
+                f"Vector layers: {len(vector_objects)} objects, "
+                f"POI empties: {len(point_objects)}, 3D buildings: {len(building_objects)}"
             )
+            tracker.log(f"Incremental mesh creation completed in {time.time() - started_at:.2f}s")
             tracker.result = True
             tracker.set_status("Completed", 1.0)
-        except Exception as e:
-            tracker.error = f"Mesh creation failed: {e}"
-            tracker.log(f"✗ Mesh error: {e}")
-        finally:
             tracker.is_running = False
-        return None  # prevents timer from re-registering
+            return
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _render_buildings(
+        self,
+        context,
+        ways,
+        bbox: BoundingBox,
+        props,
+        dem_sampler: DemHeightSampler | None,
+        scene_scale: SceneScale,
+    ) -> list:
+        client = Osm3DModelClient()
+        renderer = Osm3DModelRenderer()
+        z_offset = scaled_map_value(props.vector_z_offset, scene_scale)
+        objects = []
+        for building in client.buildings_from_ways(ways):
+            terrain_z = (
+                dem_sampler.sample_z(building.center_lat, building.center_lon)
+                if dem_sampler and props.drape_vectors_on_dem
+                else 0.0
+            )
+            objects.append(
+                renderer.render_building(
+                    context,
+                    building,
+                    bbox,
+                    props.detail_level,
+                    scene_scale.km_per_bu,
+                    base_z=terrain_z + z_offset,
+                )
+            )
+        return objects
+
+    @staticmethod
+    def _build_building_payloads(
+        buildings,
+        bbox: BoundingBox,
+        props,
+        dem_sampler: DemHeightSampler | None,
+        scene_scale: SceneScale,
+        z_offset: float,
+        name: str,
+    ):
+        def base_z_for_building(building):
+            terrain_z = (
+                dem_sampler.sample_z(building.center_lat, building.center_lon)
+                if dem_sampler and props.drape_vectors_on_dem
+                else 0.0
+            )
+            return terrain_z + z_offset
+
+        return build_building_batch_payload(
+            buildings,
+            bbox,
+            props.detail_level,
+            scene_scale.km_per_bu,
+            base_z_for_building,
+            name=name,
+            max_vertices_per_building=12,
+        )
+
+    @classmethod
+    def _mesh_progress_total_steps(
+        cls,
+        *,
+        satellite_count: int,
+        dem_tile_count: int,
+        has_single_dem: bool,
+        vector_layer_count: int,
+        point_count: int,
+        building_count: int = 0,
+        building_chunk_count: int | None = None,
+    ) -> int:
+        del satellite_count, dem_tile_count, has_single_dem
+        point_batches = cls._batch_count(point_count, cls._POINT_BATCH_SIZE)
+        building_batches = (
+            building_chunk_count
+            if building_chunk_count is not None
+            else cls._batch_count(building_count, cls._BUILDING_BATCH_SIZE)
+        )
+        return max(
+            1,
+            1
+            + vector_layer_count * 2
+            + point_batches
+            + building_batches * 2
+            + 1,
+        )
+
+    @classmethod
+    def _mesh_progress(cls, completed_steps: int, total_steps: int) -> float:
+        if total_steps <= 0:
+            return cls._MESH_PROGRESS_START
+        ratio = max(0.0, min(1.0, completed_steps / total_steps))
+        return cls._MESH_PROGRESS_START + (
+            cls._MESH_PROGRESS_END - cls._MESH_PROGRESS_START
+        ) * ratio
+
+    @staticmethod
+    def _batch_count(count: int, batch_size: int) -> int:
+        if count <= 0:
+            return 0
+        return (count + batch_size - 1) // batch_size
+
+    @classmethod
+    def _building_chunks(cls, buildings) -> list:
+        chunks = []
+        current = []
+        current_vertices = 0
+        for building in buildings:
+            estimated_vertices = max(6, min(len(building.geometry), 12) * 2)
+            if (
+                current
+                and current_vertices + estimated_vertices > cls._BUILDING_VERTEX_CHUNK_LIMIT
+            ):
+                chunks.append(current)
+                current = []
+                current_vertices = 0
+            current.append(building)
+            current_vertices += estimated_vertices
+        if current:
+            chunks.append(current)
+        return chunks
+
+    @staticmethod
+    def _building_chunk_name(index: int, total: int) -> str:
+        if total <= 1:
+            return "GeoMap_3D_Buildings"
+        return f"GeoMap_3D_Buildings_{index:03d}"
+
+    @staticmethod
+    def _split_building_ways(osm_data: GeoMapData, props) -> tuple[list, list]:
+        if not props.import_buildings:
+            return [], osm_data.ways
+        building_ways = []
+        vector_ways = []
+        for way in osm_data.ways:
+            if way.tags.get("building") or way.tags.get("building:part"):
+                building_ways.append(way)
+            else:
+                vector_ways.append(way)
+        return building_ways, vector_ways
+
+    @staticmethod
+    def _unique_points(points) -> list:
+        unique = []
+        seen: set[tuple[str, int, int, int]] = set()
+        for point in points:
+            key = (
+                point.category,
+                point.id,
+                round(point.lat * 1_000_000),
+                round(point.lon * 1_000_000),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(point)
+        return unique
 
     @classmethod
     def _split_vector_layers(
@@ -717,6 +1276,226 @@ class GeoMapClearDownloadCacheOperator(Operator):
             f"Download cache cleared ({stats['files']} files remaining)",
         )
         return {"FINISHED"}
+
+
+class GeoMapStoreBasemapTokenOperator(Operator):
+    bl_idname = "geomap.store_basemap_token"
+    bl_label = "Store Encrypted Basemap Token"
+    bl_description = "Encrypt and store the current basemap provider token"
+
+    token_prop: StringProperty(default="")
+    encrypted_prop: StringProperty(default="")
+
+    def execute(self, context):
+        prefs = GeoMapGenerateOperator._get_addon_preferences(context)
+        if prefs is None:
+            self.report({"ERROR"}, "GeoMap addon preferences not found")
+            return {"CANCELLED"}
+        raw = getattr(prefs, self.token_prop, "")
+        if not raw:
+            self.report({"ERROR"}, "Enter a token first")
+            return {"CANCELLED"}
+        from .token_security import encrypt_token
+
+        setattr(prefs, self.encrypted_prop, encrypt_token(raw))
+        setattr(prefs, self.token_prop, "")
+        self.report({"INFO"}, "Token stored encrypted")
+        return {"FINISHED"}
+
+
+class GeoMapUpdateLayerOperator(Operator):
+    bl_idname = "geomap.update_layer"
+    bl_label = "Update GeoMap Layer"
+    bl_description = "Regenerate only one GeoMap output layer using the existing map bbox and cache"
+
+    layer_kind: EnumProperty(
+        items=[
+            ("IMAGERY", "Imagery", "Update satellite/map imagery only"),
+            ("DEM", "DEM", "Update terrain DEM only"),
+            ("VECTORS", "Vectors", "Update OSM vector, POI, and 3D building layers only"),
+        ],
+        default="IMAGERY",
+    )
+
+    def execute(self, context):
+        tracker = ProgressTracker.get_instance()
+        if tracker.is_running:
+            self.report({"ERROR"}, "A GeoMap generation is already running")
+            return {"CANCELLED"}
+
+        props = context.scene.geomap_props
+        apply_quality_preset_to_props(props)
+        apply_output_preset_to_props(props)
+        settings = GenerationSettings.from_props(props)
+        prefs = ProviderSettings.from_preferences(GeoMapGenerateOperator._get_addon_preferences(context))
+        configure_blender_cache_root()
+        configure_blender_log_path()
+
+        try:
+            bbox = self._current_bbox()
+            scene_scale = SceneScale.from_scene(
+                context.scene,
+                bbox,
+                settings.detail_level,
+                settings.dem_height_scale,
+            )
+            if self.layer_kind == "IMAGERY":
+                self._update_imagery(context, bbox, settings, prefs, tracker)
+            elif self.layer_kind == "DEM":
+                self._update_dem(context, bbox, settings, prefs, scene_scale, tracker)
+            else:
+                self._update_vectors(context, bbox, settings, prefs, scene_scale, tracker)
+        except Exception as error:
+            tracker.log(f"✗ Layer update failed: {error}")
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Updated GeoMap {self.layer_kind.lower()} layer")
+        return {"FINISHED"}
+
+    @staticmethod
+    def _current_bbox() -> BoundingBox:
+        import bpy
+
+        root = bpy.data.collections.get("GeoMap")
+        if root is None:
+            raise RuntimeError("Generate a map first. GeoMap collection metadata not found.")
+        raw_bbox = root.get("geomap_bbox")
+        if not raw_bbox:
+            raise RuntimeError("Generate a map first. GeoMap bbox metadata not found.")
+        values = [float(value) for value in str(raw_bbox).split(",")]
+        if len(values) != 4:
+            raise RuntimeError("GeoMap bbox metadata is invalid.")
+        return BoundingBox(values[0], values[1], values[2], values[3])
+
+    def _update_imagery(
+        self,
+        context,
+        bbox: BoundingBox,
+        settings: GenerationSettings,
+        prefs: ProviderSettings,
+        tracker: ProgressTracker,
+    ) -> None:
+        tracker.log("Updating imagery layer only")
+        removed = clear_geomap_child_collection("Textures")
+        tracker.log(f"Removed {removed} existing imagery objects")
+        tiles = SatelliteImageryClient().fetch_bbox_tiles(
+            bbox,
+            settings.satellite_resolution,
+            settings.map_style,
+            provider=prefs.basemap_provider,
+            tokens=GeoMapGenerateOperator()._basemap_tokens(prefs),
+        )
+        renderer = TerrainRenderer()
+        for index, tile in enumerate(tiles, start=1):
+            renderer.create_satellite_bbox(context, tile, bbox, settings, index)
+        tracker.log(f"Updated imagery tiles: {len(tiles)}")
+
+    def _update_dem(
+        self,
+        context,
+        bbox: BoundingBox,
+        settings: GenerationSettings,
+        prefs: ProviderSettings,
+        scene_scale: SceneScale,
+        tracker: ProgressTracker,
+    ) -> None:
+        tracker.log("Updating DEM layer only")
+        removed = clear_geomap_child_collection("Terrain")
+        tracker.log(f"Removed {removed} existing terrain objects")
+        grid = DemClient().fetch_grid(
+            bbox,
+            settings.dem_resolution,
+            provider=prefs.dem_provider,
+        )
+        TerrainRenderer().create_dem_mesh(
+            context,
+            grid,
+            settings,
+            scene_scale.dem_height_scale,
+            scene_scale=scene_scale,
+            projection_bbox=bbox,
+        )
+        tracker.log(f"Updated DEM grid: {grid.rows}x{grid.cols}")
+
+    def _update_vectors(
+        self,
+        context,
+        bbox: BoundingBox,
+        settings: GenerationSettings,
+        prefs: ProviderSettings,
+        scene_scale: SceneScale,
+        tracker: ProgressTracker,
+    ) -> None:
+        tracker.log("Updating vector layers only")
+        for collection_name in (
+            "Coastlines",
+            "Rivers",
+            "Roads",
+            "Admin",
+            "Other",
+            "POI",
+            "3D Models",
+        ):
+            removed = clear_geomap_child_collection(collection_name)
+            if removed:
+                tracker.log(f"Removed {removed} objects from {collection_name}")
+
+        op = GeoMapGenerateOperator()
+        op._prefs = prefs
+        op._client = OsmApiClient()
+        data = op._fetch_vector_data(bbox, settings, tracker)
+        building_ways, vector_ways = op._split_building_ways(data, settings)
+        vector_layers = op._split_vector_layers(
+            GeoMapData(ways=vector_ways, bbox=bbox, points=data.points)
+        )
+        dem_sampler = None
+        if settings.import_relief and settings.drape_vectors_on_dem:
+            grid = DemClient().fetch_grid(
+                bbox,
+                settings.dem_resolution,
+                provider=prefs.dem_provider,
+            )
+            dem_sampler = DemHeightSampler([grid], scene_scale.dem_height_scale)
+            tracker.log(f"Reused DEM grid for vector draping: {grid.rows}x{grid.cols}")
+        vector_renderer = VectorRenderer()
+        vector_objects = vector_renderer.render_layers(
+            context,
+            vector_layers,
+            settings,
+            dem_sampler,
+            scene_scale,
+        )
+        point_objects = vector_renderer.render_points(
+            context,
+            data,
+            settings,
+            dem_sampler,
+            scene_scale,
+        )
+        building_objects = []
+        if settings.import_buildings and building_ways:
+            buildings = Osm3DModelClient().buildings_from_ways(building_ways)
+            chunks = GeoMapGenerateOperator._building_chunks(buildings)
+            renderer = Osm3DModelRenderer()
+            z_offset = scaled_map_value(settings.vector_z_offset, scene_scale)
+            for chunk_index, chunk in enumerate(chunks, start=1):
+                payload = GeoMapGenerateOperator._build_building_payloads(
+                    chunk,
+                    bbox,
+                    settings,
+                    dem_sampler,
+                    scene_scale,
+                    z_offset,
+                    name=GeoMapGenerateOperator._building_chunk_name(chunk_index, len(chunks)),
+                )
+                obj = renderer.commit_batch_payload(context, payload, chunk_index)
+                if obj:
+                    building_objects.append(obj)
+        tracker.log(
+            f"Updated vectors: {len(vector_objects)} layer objects, "
+            f"{len(point_objects)} POI, {len(building_objects)} building mesh objects"
+        )
 
 
 class GeoMapImportSelectedPoi3DOperator(Operator):

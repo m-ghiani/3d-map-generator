@@ -32,3 +32,7 @@ def write_log_entry(entry: str) -> None:
             handle.write(f"{time.strftime('%Y-%m-%d')} {entry}\n")
     except OSError:
         pass
+
+
+def log_path() -> Path | None:
+    return _LOG_PATH

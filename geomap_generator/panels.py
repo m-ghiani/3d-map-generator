@@ -1,6 +1,8 @@
 from bpy.types import Panel
 
 from .download_cache import cache_stats
+from .persistent_log import log_path
+from .provider_help import provider_quality
 from .progress import ProgressTracker
 from .search_cache import load_history
 
@@ -14,77 +16,182 @@ class GeoMapPanel(Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.operator("geomap.generate", text="Generate Map")
+        layout.operator("geomap.import_selected_poi_3d", text="Import Selected POI 3D")
+
+
+class GeoMapInputPanel(Panel):
+    bl_label = "Input"
+    bl_idname = "VIEW3D_PT_geomap_input"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "GeoMap"
+    bl_parent_id = "VIEW3D_PT_geomap_generator"
+
+    def draw(self, context):
+        layout = self.layout
         props = context.scene.geomap_props
 
-        box = layout.box()
-        box.label(text="Input")
-        box.row().prop(props, "input_mode", expand=True)
+        layout.row().prop(props, "input_mode", expand=True)
 
         if props.input_mode == "COUNTRY":
-            box.prop(props, "country_region")
+            layout.prop(props, "country_region")
         else:
-            box.label(text="Point A")
-            col = box.column()
+            layout.label(text="Point A")
+            col = layout.column()
             col.prop(props, "latitude")
             col.prop(props, "longitude")
-            box.label(text="Point B")
+            layout.label(text="Point B")
             col.prop(props, "latitude2")
             col.prop(props, "longitude2")
 
-        quality_box = layout.box()
-        quality_box.label(text="Quality")
-        quality_box.prop(props, "quality_preset")
-        quality_box.prop(props, "output_preset")
-        quality_box.prop(props, "detail_level")
 
-        vector_box = layout.box()
-        vector_box.label(text="Vector Layers")
-        col = vector_box.column(align=True)
+class GeoMapQualityPanel(Panel):
+    bl_label = "Quality"
+    bl_idname = "VIEW3D_PT_geomap_quality"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "GeoMap"
+    bl_parent_id = "VIEW3D_PT_geomap_generator"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        props = context.scene.geomap_props
+        layout = self.layout
+        layout.prop(props, "quality_preset")
+        layout.prop(props, "output_preset")
+        layout.prop(props, "detail_level")
+
+
+class GeoMapVectorPanel(Panel):
+    bl_label = "Vector Layers"
+    bl_idname = "VIEW3D_PT_geomap_vectors"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "GeoMap"
+    bl_parent_id = "VIEW3D_PT_geomap_generator"
+
+    def draw(self, context):
+        props = context.scene.geomap_props
+        layout = self.layout
+        col = layout.column(align=True)
         col.prop(props, "import_coast")
         col.prop(props, "import_rivers")
         col.prop(props, "import_roads")
         col.prop(props, "import_admin")
+        col.prop(props, "import_buildings")
         if props.import_admin:
-            vector_box.prop(props, "admin_level")
+            layout.prop(props, "admin_level")
 
-        poi_box = layout.box()
-        poi_box.label(text="Points of Interest")
-        col = poi_box.column(align=True)
+
+class GeoMapPoiPanel(Panel):
+    bl_label = "Points of Interest"
+    bl_idname = "VIEW3D_PT_geomap_poi"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "GeoMap"
+    bl_parent_id = "VIEW3D_PT_geomap_generator"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        props = context.scene.geomap_props
+        col = self.layout.column(align=True)
         col.prop(props, "import_cities")
         col.prop(props, "import_poi_historic")
         col.prop(props, "import_poi_cultural")
         col.prop(props, "import_poi_administrative")
         col.prop(props, "import_poi_natural")
 
-        terrain_box = layout.box()
-        terrain_box.label(text="Terrain and Map")
-        col = terrain_box.column(align=True)
+
+class GeoMapTerrainPanel(Panel):
+    bl_label = "Terrain and Map"
+    bl_idname = "VIEW3D_PT_geomap_terrain"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "GeoMap"
+    bl_parent_id = "VIEW3D_PT_geomap_generator"
+
+    def draw(self, context):
+        props = context.scene.geomap_props
+        layout = self.layout
+        prefs = self._addon_preferences(context)
+        col = layout.column(align=True)
         col.prop(props, "import_relief")
         if props.import_relief:
-            terrain_box.prop(props, "dem_resolution")
-            terrain_box.prop(props, "dem_height_scale", slider=True)
-            terrain_box.prop(props, "drape_vectors_on_dem")
-            terrain_box.prop(props, "print_base_height", slider=True)
+            layout.prop(props, "dem_resolution")
+            layout.prop(props, "dem_height_scale", slider=True)
+            layout.prop(props, "drape_vectors_on_dem")
+            layout.prop(props, "print_base_height", slider=True)
         col.prop(props, "import_satellite")
         if props.import_satellite:
-            terrain_box.prop(props, "map_style")
-            terrain_box.prop(props, "satellite_resolution")
+            layout.prop(props, "map_style")
+            layout.prop(props, "satellite_resolution")
+            provider = getattr(prefs, "basemap_provider", "AUTO") if prefs else "AUTO"
+            self._draw_provider_quality(layout, provider)
 
-        output_box = layout.box()
-        output_box.label(text="Output Geometry")
-        output_box.prop(props, "vector_z_offset", slider=True)
-        output_box.prop(props, "road_geometry")
-        output_box.prop(props, "road_width", slider=True)
-        output_box.prop(props, "river_geometry")
-        output_box.prop(props, "river_width", slider=True)
-        output_box.prop(props, "boundary_width", slider=True)
-        output_box.prop(props, "coast_width", slider=True)
-        row = output_box.row(align=True)
+    @staticmethod
+    def _addon_preferences(context):
+        package = __package__.split(".")[0] if __package__ else "geomap_generator"
+        for key in (__package__, package, "geomap_generator", "3d-map-generator"):
+            if key and key in context.preferences.addons:
+                return context.preferences.addons[key].preferences
+        return None
+
+    @staticmethod
+    def _draw_provider_quality(layout, provider: str) -> None:
+        info = provider_quality(provider)
+        if not info:
+            return
+        box = layout.box()
+        box.label(text="Source Imagery Quality")
+        box.label(text=info.get("label", provider))
+        for key in ("quality", "coverage", "notes"):
+            text = info.get(key)
+            if text:
+                box.label(text=text[:120])
+
+
+class GeoMapOutputPanel(Panel):
+    bl_label = "Output Geometry"
+    bl_idname = "VIEW3D_PT_geomap_output"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "GeoMap"
+    bl_parent_id = "VIEW3D_PT_geomap_generator"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        props = context.scene.geomap_props
+        layout = self.layout
+        layout.prop(props, "vector_z_offset", slider=True)
+        layout.prop(props, "road_geometry")
+        layout.prop(props, "road_width", slider=True)
+        layout.prop(props, "river_geometry")
+        layout.prop(props, "river_width", slider=True)
+        layout.prop(props, "boundary_width", slider=True)
+        layout.prop(props, "coast_width", slider=True)
+        row = layout.row(align=True)
         row.prop(props, "add_legend")
         row.prop(props, "add_scale_bar")
 
-        layout.operator("geomap.generate", text="Generate Map")
-        layout.operator("geomap.import_selected_poi_3d", text="Import Selected POI 3D")
+
+class GeoMapUpdatePanel(Panel):
+    bl_label = "Update Existing Layer"
+    bl_idname = "VIEW3D_PT_geomap_update"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "GeoMap"
+    bl_parent_id = "VIEW3D_PT_geomap_generator"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, _context):
+        row = self.layout.row(align=True)
+        op = row.operator("geomap.update_layer", text="Imagery")
+        op.layer_kind = "IMAGERY"
+        op = row.operator("geomap.update_layer", text="DEM")
+        op.layer_kind = "DEM"
+        op = row.operator("geomap.update_layer", text="Vectors")
+        op.layer_kind = "VECTORS"
 
 
 class GeoMapProgressPanel(Panel):
@@ -135,6 +242,9 @@ class GeoMapProgressPanel(Panel):
             )
         )
         debug_box.label(text=f"Cache files {stats['files']} | {stats['bytes'] / (1024 * 1024):.1f} MB")
+        path = log_path()
+        if path:
+            debug_box.label(text=f"Log: {path}")
 
         if tracker.is_running:
             row = layout.row()

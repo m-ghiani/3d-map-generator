@@ -1,0 +1,56 @@
+{
+  "ARCGIS": {
+    "label": "Esri / ArcGIS World Imagery",
+    "quality": "Variabile: circa 1 m o migliore in molte aree; più bassa altrove.",
+    "coverage": "Globale, mosaico di sorgenti satellitari e aeree.",
+    "notes": "La risoluzione reale dipende dall'area. Esri espone metadata con provider, data, risoluzione e accuratezza in molte zone."
+  },
+  "MAPBOX": {
+    "label": "Mapbox Satellite",
+    "quality": "Globale fino a zoom 16: circa 1-2 m; regionale fino a zoom 18: circa 0.6-0.3 m; selettiva zoom 21+: circa 7.5 cm+.",
+    "coverage": "Globale con dettaglio più alto in aree selezionate.",
+    "notes": "Mosaico di MODIS/Landsat/Maxar/Vexcel/open aerial imagery in base allo zoom e alla regione."
+  },
+  "MAPTILER": {
+    "label": "MapTiler Satellite",
+    "quality": "Satellite medium resolution fino a zoom 13; aerial/high-detail data circa zoom 14-19 dove disponibile.",
+    "coverage": "Globale con aerial imagery ad alta chiarezza in aree coperte.",
+    "notes": "La risoluzione dipende dallo zoom e dai prodotti aerial/satellite disponibili per l'area."
+  },
+  "GOOGLE": {
+    "label": "Google Satellite",
+    "quality": "Molto variabile: aerial ad alta risoluzione in molte aree urbane, satellite più grossolano altrove.",
+    "coverage": "Globale, mosaico proprietario.",
+    "notes": "Google non espone una selezione diretta della GSD sorgente nella Static Maps API; la qualità dipende da area e zoom."
+  },
+  "NASA_GIBS": {
+    "label": "NASA GIBS",
+    "quality": "MODIS true color circa 250 m; VIIRS tipicamente 375-750 m a seconda del layer.",
+    "coverage": "Globale, scientifica, spesso daily/time-based.",
+    "notes": "Ottimo per contesto scientifico/planetario, non adatto a dettaglio urbano."
+  },
+  "SENTINEL_HUB": {
+    "label": "Sentinel Hub",
+    "quality": "Sentinel-2: 10 m, 20 m o 60 m a seconda delle bande; altri dataset dipendono dalla configurazione.",
+    "coverage": "Globale o quasi globale per Sentinel/Landsat, dipende dal dataset.",
+    "notes": "Richiede configurazione endpoint/process API e scelta dataset, data e cloud cover."
+  },
+  "PLANET": {
+    "label": "Planet",
+    "quality": "PlanetScope circa 3 m; SkySat circa 50 cm ortorettificato.",
+    "coverage": "Commerciale, alta frequenza temporale; copertura e accesso dipendono dal contratto.",
+    "notes": "Richiede API/account e scelta prodotto, data, asset e licenza."
+  },
+  "MAXAR": {
+    "label": "Maxar",
+    "quality": "Commerciale very high resolution: nativa circa 30 cm; prodotti HD derivati circa 15 cm.",
+    "coverage": "Commerciale globale/selettiva secondo catalogo e tasking.",
+    "notes": "Richiede account/endpoint enterprise e licenza specifica."
+  },
+  "AIRBUS": {
+    "label": "Airbus",
+    "quality": "Commerciale high/very-high resolution; Pleiades circa 50 cm, prodotti più recenti possono essere migliori.",
+    "coverage": "Commerciale secondo catalogo e tasking.",
+    "notes": "Richiede account OneAtlas/enterprise, endpoint e licenza specifica."
+  }
+}

@@ -45,7 +45,7 @@ class SceneScale:
             extent_lat_km=extent_lat_km,
             extent_lon_km=extent_lon_km,
             km_per_bu=km_per_bu,
-            dem_height_scale=dem_height_scale * map_units / max(extent_km * 1000.0, 1.0),
+            dem_height_scale=dem_height_scale,
             map_units=map_units,
             map_unit=map_units / 10.0,
             object_scale=max(0.08, min(1.0, 2.0 / km_per_bu)),

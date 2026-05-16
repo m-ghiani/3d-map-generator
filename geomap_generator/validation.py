@@ -51,6 +51,12 @@ def _has_selected_output(settings: GenerationSettings) -> bool:
             settings.import_rivers,
             settings.import_roads,
             settings.import_admin,
+            settings.import_buildings,
+            settings.import_cities,
+            settings.import_poi_historic,
+            settings.import_poi_cultural,
+            settings.import_poi_administrative,
+            settings.import_poi_natural,
             settings.import_satellite,
             settings.import_relief,
         )

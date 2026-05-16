@@ -20,6 +20,19 @@ _DEM_PROVIDER_ITEMS = [
 _BASEMAP_PROVIDER_ITEMS = [
     ("AUTO", "Auto", "Use the best available basemap imagery provider"),
     ("ARCGIS", "ArcGIS / Esri", "ArcGIS Online export services"),
+    ("MAPTILER", "MapTiler Satellite", "MapTiler Static Maps API; requires API key"),
+    ("MAPBOX", "Mapbox Satellite", "Mapbox Static Images API; requires access token"),
+    ("GOOGLE", "Google Satellite", "Google Static Maps API; requires API key"),
+    ("NASA_GIBS", "NASA GIBS", "NASA GIBS WMS imagery; no token required"),
+    ("SENTINEL_HUB", "Sentinel Hub", "Sentinel Hub imagery; requires service configuration"),
+    ("PLANET", "Planet", "Planet imagery; requires account/API integration"),
+    ("MAXAR", "Maxar", "Maxar imagery; requires account/API integration"),
+    ("AIRBUS", "Airbus", "Airbus imagery; requires account/API integration"),
+]
+
+_DATA_BACKEND_ITEMS = [
+    ("LOCAL", "Local Blender Thread", "Fetch and preprocess data inside Blender"),
+    ("EXTERNAL", "External Local Service", "Use geomap_service.py for data fetching and preprocessing"),
 ]
 
 
@@ -31,6 +44,25 @@ def _addon_preferences_id() -> str:
 class GeoMapAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = _addon_preferences_id()
 
+    data_backend: EnumProperty(
+        name="Data Backend",
+        items=_DATA_BACKEND_ITEMS,
+        default="LOCAL",
+    )
+    service_url: StringProperty(
+        name="Service URL",
+        default="http://127.0.0.1:8765",
+    )
+    service_auto_start: BoolProperty(
+        name="Auto-start Local Service",
+        default=True,
+    )
+    service_port: IntProperty(
+        name="Local Service Port",
+        default=8765,
+        min=1024,
+        max=65535,
+    )
     dem_provider: EnumProperty(
         name="DEM Provider",
         items=_DEM_PROVIDER_ITEMS,
@@ -61,15 +93,58 @@ class GeoMapAddonPreferences(bpy.types.AddonPreferences):
         items=_BASEMAP_PROVIDER_ITEMS,
         default="AUTO",
     )
+    maptiler_token: StringProperty(
+        name="MapTiler API Key",
+        subtype="PASSWORD",
+    )
+    maptiler_token_encrypted: StringProperty(options={"HIDDEN"})
+    mapbox_token: StringProperty(
+        name="Mapbox Access Token",
+        subtype="PASSWORD",
+    )
+    mapbox_token_encrypted: StringProperty(options={"HIDDEN"})
+    google_token: StringProperty(
+        name="Google API Key",
+        subtype="PASSWORD",
+    )
+    google_token_encrypted: StringProperty(options={"HIDDEN"})
+    sentinel_hub_token: StringProperty(
+        name="Sentinel Hub Token",
+        subtype="PASSWORD",
+    )
+    sentinel_hub_token_encrypted: StringProperty(options={"HIDDEN"})
+    planet_token: StringProperty(
+        name="Planet API Key",
+        subtype="PASSWORD",
+    )
+    planet_token_encrypted: StringProperty(options={"HIDDEN"})
+    maxar_token: StringProperty(
+        name="Maxar Token",
+        subtype="PASSWORD",
+    )
+    maxar_token_encrypted: StringProperty(options={"HIDDEN"})
+    airbus_token: StringProperty(
+        name="Airbus Token",
+        subtype="PASSWORD",
+    )
+    airbus_token_encrypted: StringProperty(options={"HIDDEN"})
 
     def draw(self, context):
         from .download_cache import cache_stats
 
         layout = self.layout
+        service_box = layout.box()
+        service_box.label(text="Generation Backend")
+        service_box.prop(self, "data_backend")
+        service_box.prop(self, "service_auto_start")
+        service_box.prop(self, "service_port")
+        service_box.prop(self, "service_url")
+
         box = layout.box()
         box.label(text="Data Providers")
         box.prop(self, "dem_provider")
         box.prop(self, "basemap_provider")
+        self._draw_basemap_token(layout)
         box.prop(self, "coast_provider")
         box.prop(self, "river_provider")
         box.prop(self, "road_provider")
@@ -89,6 +164,35 @@ class GeoMapAddonPreferences(bpy.types.AddonPreferences):
         row.operator("geomap.clear_download_cache", text="Clear DEM").namespace = "dem"
         row.operator("geomap.clear_download_cache", text="Clear OSM").namespace = "overpass"
         row.operator("geomap.clear_download_cache", text="Clear Maps").namespace = "imagery"
+
+    def _draw_basemap_token(self, layout) -> None:
+        provider = self.basemap_provider
+        token_props = {
+            "MAPTILER": ("maptiler_token", "maptiler_token_encrypted"),
+            "MAPBOX": ("mapbox_token", "mapbox_token_encrypted"),
+            "GOOGLE": ("google_token", "google_token_encrypted"),
+            "SENTINEL_HUB": ("sentinel_hub_token", "sentinel_hub_token_encrypted"),
+            "PLANET": ("planet_token", "planet_token_encrypted"),
+            "MAXAR": ("maxar_token", "maxar_token_encrypted"),
+            "AIRBUS": ("airbus_token", "airbus_token_encrypted"),
+        }
+        if provider not in token_props:
+            return
+        from .token_security import has_encrypted_token
+
+        token_prop, encrypted_prop = token_props[provider]
+        token_box = layout.box()
+        token_box.label(text=f"{provider} Credentials")
+        from .provider_help import token_help_lines
+
+        for line in token_help_lines(provider):
+            token_box.label(text=line)
+        token_box.prop(self, token_prop)
+        op = token_box.operator("geomap.store_basemap_token", text="Store Encrypted Token")
+        op.token_prop = token_prop
+        op.encrypted_prop = encrypted_prop
+        stored = has_encrypted_token(getattr(self, encrypted_prop, ""))
+        token_box.label(text="Stored encrypted token: yes" if stored else "Stored encrypted token: no")
 
 
 class GeoMapProperties(bpy.types.PropertyGroup):
@@ -255,6 +359,7 @@ class GeoMapProperties(bpy.types.PropertyGroup):
     add_scale_bar: BoolProperty(name="Scale Bar", default=True)
     import_roads: BoolProperty(name="Main Roads", default=False)
     import_admin: BoolProperty(name="Administrative Boundaries", default=False)
+    import_buildings: BoolProperty(name="3D Buildings", default=False)
     import_cities: BoolProperty(name="Cities", default=False)
     import_poi_historic: BoolProperty(name="Historic POI", default=False)
     import_poi_cultural: BoolProperty(name="Cultural POI", default=False)

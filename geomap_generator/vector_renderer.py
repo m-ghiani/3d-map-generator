@@ -9,6 +9,7 @@ from .layer_style import (
     color_for_layer,
     width_for_way,
 )
+from .geometry_payload import VectorCurvePayload, VectorMeshPayload
 from .mesh_builder import BboxProjector, DemHeightSampler, LineMeshBuilder, RibbonMeshBuilder
 from .models import GeoMapData, OsmWay
 from .scene_units import SceneScale, scaled_map_value
@@ -16,6 +17,14 @@ from .threading_utils import assert_main_thread
 
 
 class VectorRenderer:
+    def commit_payload(self, context, payload, active: bool = False):
+        assert_main_thread()
+        if isinstance(payload, VectorCurvePayload):
+            return self._commit_curve_payload(context, payload, active)
+        if isinstance(payload, VectorMeshPayload):
+            return self._commit_mesh_payload(context, payload, active)
+        return None
+
     def render_layers(
         self,
         context,
@@ -164,6 +173,60 @@ class VectorRenderer:
         obj["geomap_way_count"] = len(layer_data.ways)
         obj["geomap_ribbon_width"] = base_width
         obj["geomap_geometry_type"] = "MESH"
+        return obj
+
+    def _commit_mesh_payload(self, context, payload: VectorMeshPayload, active: bool):
+        if not payload.verts:
+            return None
+        mesh = bpy.data.meshes.new(f"{payload.object_name}_Mesh")
+        obj = bpy.data.objects.new(payload.object_name, mesh)
+        link_to_geomap_collection(context, obj, collection_name_for_layer(payload.layer_key))
+        if active:
+            set_active(context, obj)
+        mesh.from_pydata(payload.verts, payload.edges, payload.faces)
+        mesh.update()
+        obj.data.materials.append(
+            material_named(
+                f"GeoMap_{collection_name_for_layer(payload.layer_key)}_Material",
+                color_for_layer(payload.layer_key),
+            )
+        )
+        obj["geomap_layer"] = payload.layer_key
+        obj["geomap_way_count"] = payload.way_count
+        obj["geomap_ribbon_width"] = payload.ribbon_width
+        obj["geomap_geometry_type"] = payload.geometry_type
+        return obj
+
+    def _commit_curve_payload(self, context, payload: VectorCurvePayload, active: bool):
+        if not payload.splines:
+            return None
+        curve = bpy.data.curves.new(f"{payload.object_name}_Curve", "CURVE")
+        curve.dimensions = "3D"
+        curve.resolution_u = 2
+        curve.bevel_depth = payload.curve_width / 2.0
+        curve.bevel_resolution = 2
+        curve.fill_mode = "FULL"
+        for points in payload.splines:
+            if len(points) < 2:
+                continue
+            spline = curve.splines.new("POLY")
+            spline.points.add(len(points) - 1)
+            for spline_point, point in zip(spline.points, points):
+                spline_point.co = point
+        obj = bpy.data.objects.new(payload.object_name, curve)
+        link_to_geomap_collection(context, obj, collection_name_for_layer(payload.layer_key))
+        if active:
+            set_active(context, obj)
+        obj.data.materials.append(
+            material_named(
+                f"GeoMap_{collection_name_for_layer(payload.layer_key)}_Material",
+                color_for_layer(payload.layer_key),
+            )
+        )
+        obj["geomap_layer"] = payload.layer_key
+        obj["geomap_way_count"] = payload.way_count
+        obj["geomap_geometry_type"] = "CURVE"
+        obj["geomap_curve_width"] = payload.curve_width
         return obj
 
     def _create_curve_layer_object(

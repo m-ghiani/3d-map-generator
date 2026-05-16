@@ -24,13 +24,17 @@ def _load_classes():
         "scene_units",
         "download_cache",
         "persistent_log",
+        "provider_help",
+        "token_security",
         "progress",
         "search_cache",
+        "serialization",
         "settings",
         "validation",
         "mesh_builder",
         "blender_scene",
         "layer_style",
+        "geometry_payload",
         "imagery",
         "dem",
         "overpass",
@@ -39,6 +43,7 @@ def _load_classes():
         "vector_renderer",
         "annotation_renderer",
         "osm_3d",
+        "service_client",
     ):
         module = importlib.import_module(f"{__name__}.{module_name}")
         importlib.reload(module)
@@ -58,14 +63,35 @@ def _load_classes():
         GeoMapGenerateOperator,
         GeoMapImportSelectedPoi3DOperator,
         GeoMapLoadHistoryOperator,
+        GeoMapStoreBasemapTokenOperator,
+        GeoMapUpdateLayerOperator,
     )
-    from .panels import GeoMapPanel, GeoMapProgressPanel, GeoMapSearchHistoryPanel
+    from .panels import (
+        GeoMapInputPanel,
+        GeoMapOutputPanel,
+        GeoMapPanel,
+        GeoMapPoiPanel,
+        GeoMapProgressPanel,
+        GeoMapQualityPanel,
+        GeoMapSearchHistoryPanel,
+        GeoMapTerrainPanel,
+        GeoMapUpdatePanel,
+        GeoMapVectorPanel,
+    )
     from .properties import GeoMapAddonPreferences, GeoMapProperties
 
     return (
+        GeoMapStoreBasemapTokenOperator,
         GeoMapAddonPreferences,
         GeoMapProperties,
         GeoMapPanel,
+        GeoMapInputPanel,
+        GeoMapQualityPanel,
+        GeoMapVectorPanel,
+        GeoMapPoiPanel,
+        GeoMapTerrainPanel,
+        GeoMapOutputPanel,
+        GeoMapUpdatePanel,
         GeoMapProgressPanel,
         GeoMapSearchHistoryPanel,
         GeoMapGenerateOperator,
@@ -74,6 +100,7 @@ def _load_classes():
         GeoMapLoadHistoryOperator,
         GeoMapClearHistoryOperator,
         GeoMapClearDownloadCacheOperator,
+        GeoMapUpdateLayerOperator,
     )
 
 

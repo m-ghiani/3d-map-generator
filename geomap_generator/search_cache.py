@@ -110,6 +110,7 @@ def snapshot_from_props(props) -> dict[str, Any]:
         "add_scale_bar": value("add_scale_bar", True),
         "import_roads": props.import_roads,
         "import_admin": props.import_admin,
+        "import_buildings": value("import_buildings", False),
         "import_cities": props.import_cities,
         "import_poi_historic": props.import_poi_historic,
         "import_poi_cultural": props.import_poi_cultural,

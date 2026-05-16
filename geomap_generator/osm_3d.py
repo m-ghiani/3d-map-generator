@@ -6,8 +6,13 @@ import bpy
 
 from .blender_scene import link_to_geomap_collection, material_named, set_active
 from .exceptions import ProviderError
+from .geometry_payload import (
+    BuildingBatchPayload,
+    BuildingMeshPayload,
+    build_building_payload,
+)
 from .mesh_builder import BboxProjector
-from .models import BoundingBox, OsmNode
+from .models import BoundingBox, OsmNode, OsmWay
 from .overpass import OsmApiClient
 from .threading_utils import assert_main_thread
 
@@ -26,6 +31,28 @@ class Osm3DBuilding:
 
 
 class Osm3DModelClient:
+    def buildings_from_ways(self, ways: list[OsmWay]) -> list[Osm3DBuilding]:
+        buildings = []
+        for way in ways:
+            if not self._is_building(way.tags):
+                continue
+            geometry = self._closed_way_geometry(way.geometry)
+            if len(geometry) < 3:
+                continue
+            tags = way.tags
+            buildings.append(
+                Osm3DBuilding(
+                    id=way.id,
+                    name=tags.get("name") or tags.get("building") or "OSM Building",
+                    geometry=geometry,
+                    tags=tags,
+                    height_m=self._height_m(tags),
+                    center_lat=sum(node.lat for node in geometry) / len(geometry),
+                    center_lon=sum(node.lon for node in geometry) / len(geometry),
+                )
+            )
+        return buildings
+
     def find_nearest_building(
         self,
         lat: float,
@@ -205,8 +232,69 @@ class Osm3DModelClient:
     def _distance_sq(lat: float, lon: float, building: Osm3DBuilding) -> float:
         return (lat - building.center_lat) ** 2 + (lon - building.center_lon) ** 2
 
+    @staticmethod
+    def _is_building(tags: dict[str, str]) -> bool:
+        return bool(tags.get("building") or tags.get("building:part"))
+
+    @staticmethod
+    def _closed_way_geometry(geometry: list[OsmNode]) -> list[OsmNode]:
+        if len(geometry) < 4:
+            return []
+        first = geometry[0]
+        last = geometry[-1]
+        if abs(first.lat - last.lat) >= 1e-9 or abs(first.lon - last.lon) >= 1e-9:
+            return []
+        return geometry[:-1]
+
 
 class Osm3DModelRenderer:
+    def build_payload(
+        self,
+        building: Osm3DBuilding,
+        bbox: BoundingBox,
+        detail_level: str,
+        km_per_bu: float,
+        base_z: float,
+    ) -> BuildingMeshPayload:
+        return build_building_payload(building, bbox, detail_level, km_per_bu, base_z)
+
+    def commit_payload(self, context, payload: BuildingMeshPayload):
+        assert_main_thread()
+        mesh = bpy.data.meshes.new(f"GeoMap_3D_{payload.id}_Mesh")
+        obj = bpy.data.objects.new(f"GeoMap_3D_{payload.name}_{payload.id}", mesh)
+        link_to_geomap_collection(context, obj, "3D Models")
+        mesh.from_pydata(payload.verts, [], payload.faces)
+        mesh.update()
+        obj.data.materials.append(
+            material_named("GeoMap_3D_Building_Material", (0.55, 0.52, 0.46, 1.0))
+        )
+        obj["geomap_layer"] = "osm_3d_building"
+        obj["geomap_osm_id"] = str(payload.id)
+        obj["geomap_height_m"] = round(payload.height_m, 2)
+        obj["geomap_height_bu"] = round(payload.height_bu, 6)
+        set_active(context, obj)
+        return obj
+
+    def commit_batch_payload(self, context, payload: BuildingBatchPayload, batch_index: int):
+        assert_main_thread()
+        if not payload.verts:
+            return None
+        mesh = bpy.data.meshes.new(f"{payload.name}_Mesh")
+        obj = bpy.data.objects.new(payload.name, mesh)
+        link_to_geomap_collection(context, obj, "3D Models")
+        mesh.from_pydata(payload.verts, [], payload.faces)
+        mesh.update()
+        obj.data.materials.append(
+            material_named("GeoMap_3D_Building_Material", (0.55, 0.52, 0.46, 1.0))
+        )
+        obj["geomap_layer"] = "osm_3d_buildings_batch"
+        obj["geomap_batch_index"] = batch_index
+        obj["geomap_building_count"] = payload.building_count
+        obj["geomap_geometry_type"] = "MERGED_MESH"
+        obj["geomap_simplified"] = True
+        set_active(context, obj)
+        return obj
+
     def render_building(
         self,
         context,
@@ -217,39 +305,11 @@ class Osm3DModelRenderer:
         base_z: float,
     ):
         assert_main_thread()
-        if km_per_bu <= 0.0:
-            raise ProviderError("GeoMap scale metadata is missing or invalid.")
-
-        projector = BboxProjector(bbox, detail_level)
-        height_bu = building.height_m / (km_per_bu * 1000.0)
-        verts = []
-        for node in building.geometry:
-            x, y, _z = projector.project(node.lat, node.lon, z=base_z)
-            verts.append((x, y, base_z))
-        top_start = len(verts)
-        verts.extend((x, y, base_z + height_bu) for x, y, _z in verts[:top_start])
-
-        bottom = tuple(reversed(range(top_start)))
-        top = tuple(range(top_start, top_start * 2))
-        faces = [bottom, top]
-        for index in range(top_start):
-            next_index = (index + 1) % top_start
-            faces.append((index, next_index, top_start + next_index, top_start + index))
-
-        mesh = bpy.data.meshes.new(f"GeoMap_3D_{building.id}_Mesh")
-        obj = bpy.data.objects.new(f"GeoMap_3D_{building.name}_{building.id}", mesh)
-        link_to_geomap_collection(context, obj, "3D Models")
-        mesh.from_pydata(verts, [], faces)
-        mesh.update()
-        obj.data.materials.append(
-            material_named("GeoMap_3D_Building_Material", (0.55, 0.52, 0.46, 1.0))
-        )
-        obj["geomap_layer"] = "osm_3d_building"
-        obj["geomap_osm_id"] = str(building.id)
-        obj["geomap_height_m"] = round(building.height_m, 2)
-        obj["geomap_height_bu"] = round(height_bu, 6)
-        set_active(context, obj)
-        return obj
+        try:
+            payload = self.build_payload(building, bbox, detail_level, km_per_bu, base_z)
+        except ValueError as error:
+            raise ProviderError(str(error)) from error
+        return self.commit_payload(context, payload)
 
 
 def _parse_number(value: str | None) -> float:

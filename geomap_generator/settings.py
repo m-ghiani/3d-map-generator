@@ -3,24 +3,50 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ProviderSettings:
+    data_backend: str = "LOCAL"
+    service_url: str = "http://127.0.0.1:8765"
+    service_auto_start: bool = True
+    service_port: int = 8765
     dem_provider: str = "AUTO"
     coast_provider: str = "AUTO"
     river_provider: str = "AUTO"
     road_provider: str = "AUTO"
     admin_provider: str = "AUTO"
     basemap_provider: str = "AUTO"
+    maptiler_token: str = ""
+    mapbox_token: str = ""
+    google_token: str = ""
+    sentinel_hub_token: str = ""
+    planet_token: str = ""
+    maxar_token: str = ""
+    airbus_token: str = ""
 
     @classmethod
     def from_preferences(cls, prefs) -> "ProviderSettings":
         if prefs is None:
             return cls()
+        from .token_security import decrypt_token
+
         return cls(
+            data_backend=getattr(prefs, "data_backend", "LOCAL"),
+            service_url=getattr(prefs, "service_url", "http://127.0.0.1:8765"),
+            service_auto_start=getattr(prefs, "service_auto_start", True),
+            service_port=getattr(prefs, "service_port", 8765),
             dem_provider=getattr(prefs, "dem_provider", "AUTO"),
             coast_provider=getattr(prefs, "coast_provider", "AUTO"),
             river_provider=getattr(prefs, "river_provider", "AUTO"),
             road_provider=getattr(prefs, "road_provider", "AUTO"),
             admin_provider=getattr(prefs, "admin_provider", "AUTO"),
             basemap_provider=getattr(prefs, "basemap_provider", "AUTO"),
+            maptiler_token=decrypt_token(getattr(prefs, "maptiler_token_encrypted", "")),
+            mapbox_token=decrypt_token(getattr(prefs, "mapbox_token_encrypted", "")),
+            google_token=decrypt_token(getattr(prefs, "google_token_encrypted", "")),
+            sentinel_hub_token=decrypt_token(
+                getattr(prefs, "sentinel_hub_token_encrypted", "")
+            ),
+            planet_token=decrypt_token(getattr(prefs, "planet_token_encrypted", "")),
+            maxar_token=decrypt_token(getattr(prefs, "maxar_token_encrypted", "")),
+            airbus_token=decrypt_token(getattr(prefs, "airbus_token_encrypted", "")),
         )
 
 
@@ -53,6 +79,7 @@ class GenerationSettings:
     add_scale_bar: bool
     import_roads: bool
     import_admin: bool
+    import_buildings: bool
     import_cities: bool
     import_poi_historic: bool
     import_poi_cultural: bool
