@@ -25,6 +25,7 @@ class OsmPoint:
     lon: float
     name: str
     category: str
+    osm_type: str = "node"
     tags: dict[str, str] = field(default_factory=dict)
 
 

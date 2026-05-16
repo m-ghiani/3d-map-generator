@@ -11,6 +11,8 @@ from .models import BoundingBox, OsmNode
 from .overpass import OsmApiClient
 from .threading_utils import assert_main_thread
 
+_DEFAULT_BUILDING_HEIGHT_M = 9.0
+
 
 @dataclass(frozen=True)
 class Osm3DBuilding:
@@ -30,13 +32,68 @@ class Osm3DModelClient:
         lon: float,
         radius_m: int = 120,
         provider: str = "AUTO",
+        osm_id: int | None = None,
+        osm_type: str | None = None,
     ) -> Osm3DBuilding:
-        query = self._build_query(lat, lon, radius_m)
-        raw = OsmApiClient._fetch_overpass_json(query, provider=provider)
-        candidates = self._parse_buildings(raw)
+        candidates = []
+        if osm_id is not None and osm_type in {"way", "relation", None, ""}:
+            for direct_query in (
+                self._build_direct_query(osm_id, osm_type, require_building=True),
+                self._build_direct_query(osm_id, osm_type, require_building=False),
+            ):
+                raw = OsmApiClient._fetch_overpass_json(direct_query, provider=provider)
+                candidates = self._parse_buildings(raw)
+                if candidates:
+                    break
         if not candidates:
-            raise ProviderError("No OSM 3D building found near the selected POI.")
+            query = self._build_query(lat, lon, radius_m)
+            raw = OsmApiClient._fetch_overpass_json(query, provider=provider)
+            candidates = self._parse_buildings(raw)
+        if not candidates:
+            query = self._build_area_query(lat, lon, radius_m)
+            raw = OsmApiClient._fetch_overpass_json(query, provider=provider)
+            candidates = self._parse_buildings(raw)
+        if not candidates:
+            raise ProviderError("No closed OSM area or building found near the selected POI.")
         return min(candidates, key=lambda item: self._distance_sq(lat, lon, item))
+
+    @staticmethod
+    def _build_direct_query(
+        osm_id: int,
+        osm_type: str | None,
+        require_building: bool,
+    ) -> str:
+        filters = []
+        suffixes = (
+            ('["building"]', '["building:part"]')
+            if require_building
+            else ("",)
+        )
+        if osm_type in {"way", None, ""}:
+            filters.extend(f"way(id:{osm_id}){suffix};" for suffix in suffixes)
+        if osm_type in {"relation", None, ""}:
+            filters.extend(f"relation(id:{osm_id}){suffix};" for suffix in suffixes)
+        return f"""
+        [out:json][timeout:25];
+        (
+          {"".join(filters)}
+        );
+        out tags geom center;
+        """
+
+    @staticmethod
+    def _build_area_query(lat: float, lon: float, radius_m: int) -> str:
+        filters = []
+        for key in ("historic", "tourism", "amenity", "leisure", "natural"):
+            filters.append(f'way(around:{radius_m},{lat:.7f},{lon:.7f})["{key}"];')
+            filters.append(f'relation(around:{radius_m},{lat:.7f},{lon:.7f})["{key}"];')
+        return f"""
+        [out:json][timeout:25];
+        (
+          {"".join(filters)}
+        );
+        out tags geom center;
+        """
 
     @staticmethod
     def _build_query(lat: float, lon: float, radius_m: int) -> str:
@@ -45,6 +102,8 @@ class Osm3DModelClient:
         (
           way(around:{radius_m},{lat:.7f},{lon:.7f})["building"];
           way(around:{radius_m},{lat:.7f},{lon:.7f})["building:part"];
+          relation(around:{radius_m},{lat:.7f},{lon:.7f})["building"];
+          relation(around:{radius_m},{lat:.7f},{lon:.7f})["building:part"];
         );
         out tags geom center;
         """
@@ -52,15 +111,13 @@ class Osm3DModelClient:
     def _parse_buildings(self, raw: dict) -> list[Osm3DBuilding]:
         buildings = []
         for element in raw.get("elements", []):
-            if not isinstance(element, dict) or element.get("type") != "way":
+            if not isinstance(element, dict) or element.get("type") not in {"way", "relation"}:
                 continue
             geometry = self._parse_geometry(element)
             if len(geometry) < 3:
                 continue
             tags = element.get("tags") or {}
             height_m = self._height_m(tags)
-            if height_m <= 0.0:
-                continue
             center_lat, center_lon = self._center(element, geometry)
             buildings.append(
                 Osm3DBuilding(
@@ -77,21 +134,53 @@ class Osm3DModelClient:
 
     @staticmethod
     def _parse_geometry(element: dict) -> list[OsmNode]:
-        geometry = []
-        for item in element.get("geometry", []):
-            if not isinstance(item, dict):
+        if element.get("type") == "relation":
+            return Osm3DModelClient._parse_relation_geometry(element)
+
+        geometry = Osm3DModelClient._geometry_from_items(element.get("geometry", []))
+        return geometry if len(geometry) >= 3 else []
+
+    @staticmethod
+    def _parse_relation_geometry(element: dict) -> list[OsmNode]:
+        rings = []
+        for member in element.get("members", []):
+            if not isinstance(member, dict):
                 continue
-            lat = item.get("lat")
-            lon = item.get("lon")
-            if lat is None or lon is None:
+            if member.get("type") != "way":
                 continue
-            geometry.append(OsmNode(id=0, lat=lat, lon=lon))
+            if member.get("role") not in {"outer", ""}:
+                continue
+            geometry = Osm3DModelClient._geometry_from_items(member.get("geometry", []))
+            if len(geometry) >= 3:
+                rings.append(geometry)
+        if not rings:
+            return []
+        return max(rings, key=Osm3DModelClient._ring_area_abs)
+
+    @staticmethod
+    def _geometry_from_items(items: list) -> list[OsmNode]:
+        geometry = [
+            OsmNode(id=0, lat=item["lat"], lon=item["lon"])
+            for item in items
+            if isinstance(item, dict)
+            and item.get("lat") is not None
+            and item.get("lon") is not None
+        ]
         if len(geometry) > 1:
             first = geometry[0]
             last = geometry[-1]
             if abs(first.lat - last.lat) < 1e-9 and abs(first.lon - last.lon) < 1e-9:
                 geometry.pop()
+            else:
+                return []
         return geometry
+
+    @staticmethod
+    def _ring_area_abs(geometry: list[OsmNode]) -> float:
+        area = 0.0
+        for first, second in zip(geometry, [*geometry[1:], geometry[0]]):
+            area += first.lon * second.lat - second.lon * first.lat
+        return abs(area)
 
     @staticmethod
     def _height_m(tags: dict[str, str]) -> float:
@@ -100,7 +189,7 @@ class Osm3DModelClient:
             if height:
                 return height
         levels = _parse_number(tags.get("building:levels"))
-        return levels * 3.0 if levels else 0.0
+        return levels * 3.0 if levels else _DEFAULT_BUILDING_HEIGHT_M
 
     @staticmethod
     def _center(element: dict, geometry: list[OsmNode]) -> tuple[float, float]:

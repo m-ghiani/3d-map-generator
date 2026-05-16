@@ -174,6 +174,10 @@ class TerrainRenderer:
             return False
 
         image = bpy.data.images.load(str(image_path), check_existing=True)
+        try:
+            image.reload()
+        except Exception:
+            pass
         tex_node = material.node_tree.nodes.new("ShaderNodeTexImage")
         tex_node.image = image
 

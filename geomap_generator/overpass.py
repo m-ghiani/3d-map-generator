@@ -118,6 +118,7 @@ class OsmJsonParser:
             lon=lon,
             name=name,
             category=category,
+            osm_type=el.get("type", "node"),
             tags=tags,
         )
 

@@ -1,6 +1,7 @@
 import tempfile
 import urllib.parse
 import urllib.request
+import hashlib
 import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -200,10 +201,26 @@ class SatelliteImageryClient:
         if not image_bytes:
             raise ProviderError("Satellite imagery service returned an empty image.")
 
-        output = Path(tempfile.gettempdir()) / f"geomap_satellite_bbox{suffix}.png"
+        output = self._image_output_path(bbox, resolution, map_style, provider, suffix)
         output.write_bytes(image_bytes)
         self._store_image_index(bbox, resolution, map_style, provider, output)
         return output
+
+    @staticmethod
+    def _image_output_path(
+        bbox: BoundingBox,
+        resolution: int,
+        map_style: str,
+        provider: str,
+        suffix: str,
+    ) -> Path:
+        key = (
+            f"{provider}|{map_style}|{min(resolution, _MAX_EXPORT_RESOLUTION)}|"
+            f"{bbox.min_lat:.7f},{bbox.min_lon:.7f},"
+            f"{bbox.max_lat:.7f},{bbox.max_lon:.7f}"
+        )
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+        return Path(tempfile.gettempdir()) / f"geomap_satellite_bbox_{digest}{suffix}.png"
 
     def _find_cached_image(
         self,

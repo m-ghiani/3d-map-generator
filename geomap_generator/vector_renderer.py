@@ -1,3 +1,5 @@
+import json
+
 import bpy
 
 from .blender_scene import link_to_geomap_collection, material_named, set_active
@@ -87,9 +89,18 @@ class VectorRenderer:
             obj.color = color_for_layer(f"poi_{point.category}")
             obj["geomap_layer"] = f"poi_{point.category}"
             obj["geomap_osm_id"] = str(point.id)
+            obj["geomap_osm_type"] = point.osm_type
+            obj["geomap_name"] = point.name
             obj["geomap_category"] = point.category
             obj["geomap_lat"] = point.lat
             obj["geomap_lon"] = point.lon
+            obj["geomap_osm_tags"] = json.dumps(
+                point.tags,
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            for tag_key, tag_value in sorted(point.tags.items()):
+                obj[f"osm:{tag_key}"] = str(tag_value)
             link_to_geomap_collection(context, obj, "POI")
             created.append(obj)
         return created

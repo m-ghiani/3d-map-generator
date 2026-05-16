@@ -724,7 +724,7 @@ class GeoMapImportSelectedPoi3DOperator(Operator):
     bl_label = "Import Selected POI 3D"
     bl_description = "Find and import an OSM 3D building near the selected GeoMap POI"
 
-    search_radius_m: IntProperty(default=120, min=10, max=1000)
+    search_radius_m: IntProperty(default=300, min=10, max=2000)
 
     @classmethod
     def poll(cls, context):
@@ -739,6 +739,8 @@ class GeoMapImportSelectedPoi3DOperator(Operator):
 
         lat = poi.get("geomap_lat")
         lon = poi.get("geomap_lon")
+        osm_id = poi.get("geomap_osm_id")
+        osm_type = poi.get("geomap_osm_type")
         if lat is None or lon is None:
             self.report({"ERROR"}, "Selected POI has no lat/lon metadata. Regenerate POIs.")
             return {"CANCELLED"}
@@ -751,6 +753,8 @@ class GeoMapImportSelectedPoi3DOperator(Operator):
                 float(lon),
                 radius_m=self.search_radius_m,
                 provider=provider,
+                osm_id=int(osm_id) if osm_id else None,
+                osm_type=str(osm_type) if osm_type else None,
             )
             obj = Osm3DModelRenderer().render_building(
                 context,
