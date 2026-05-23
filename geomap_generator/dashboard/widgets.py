@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-__all__ = ["Rect", "UIWidget"]
+__all__ = ["Rect", "UIWidget", "Button", "Toggle"]
 
 
 @dataclass
@@ -53,3 +53,48 @@ class UIWidget:
 
     def on_mouse_move(self, mx: float, my: float) -> None:
         self.hovered = self.hit_test(mx, my)
+
+
+class Button(UIWidget):
+    """Clickable button. Fires callback on mouse-press + release inside bounds."""
+
+    def __init__(self, rect: Rect, label: str, callback: Callable[[], None]) -> None:
+        super().__init__(rect)
+        self.label = label
+        self.callback = callback
+        self._pressed: bool = False
+
+    def on_mouse_press(self, mx: float, my: float) -> bool:
+        if self.hit_test(mx, my):
+            self._pressed = True
+            return True
+        return False
+
+    def on_mouse_release(self, mx: float, my: float) -> bool:
+        if self._pressed:
+            self._pressed = False
+            if self.hit_test(mx, my):
+                self.callback()
+                return True
+        return False
+
+
+class Toggle(UIWidget):
+    """Boolean toggle. Reads/writes a bool property on a props object."""
+
+    def __init__(self, rect: Rect, label: str, props: object, prop_name: str) -> None:
+        super().__init__(rect)
+        self.label = label
+        self.props = props
+        self.prop_name = prop_name
+
+    @property
+    def value(self) -> bool:
+        """Current boolean value read from props."""
+        return bool(getattr(self.props, self.prop_name, False))
+
+    def on_mouse_press(self, mx: float, my: float) -> bool:
+        if self.hit_test(mx, my):
+            setattr(self.props, self.prop_name, not self.value)
+            return True
+        return False
