@@ -156,12 +156,14 @@ class SliderFloatTests(unittest.TestCase):
 
     def test_clamps_below_min(self):
         s, props = self._make()
-        s.on_mouse_press(-50, 10)
+        s.on_mouse_press(10, 10)    # inside → starts drag
+        s.on_mouse_move(-50, 10)    # drag past left edge → clamped to 0.0
         self.assertAlmostEqual(props.width, 0.0, places=2)
 
     def test_clamps_above_max(self):
         s, props = self._make()
-        s.on_mouse_press(200, 10)
+        s.on_mouse_press(90, 10)    # inside → starts drag
+        s.on_mouse_move(200, 10)    # drag past right edge → clamped to 1.0
         self.assertAlmostEqual(props.width, 1.0, places=2)
 
     def test_no_drag_after_release(self):
