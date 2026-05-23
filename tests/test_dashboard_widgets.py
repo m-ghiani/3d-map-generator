@@ -178,3 +178,60 @@ class SliderFloatTests(unittest.TestCase):
         s.on_mouse_press(200, 10)  # outside rect
         s.on_mouse_move(50, 10)
         self.assertAlmostEqual(props.width, 0.0, places=2)
+
+
+class RadioGroupTests(unittest.TestCase):
+    def _make(self):
+        from geomap_generator.dashboard.widgets import RadioGroup, Rect
+        from types import SimpleNamespace
+        props = SimpleNamespace(geometry="CURVE")
+        opts = [("CURVE", "Curve"), ("MESH", "Mesh")]
+        r = RadioGroup(Rect(0, 0, 100, 20), props, "geometry", opts)
+        return r, props
+
+    def test_click_right_half_selects_mesh(self):
+        r, props = self._make()
+        r.on_mouse_press(75, 10)
+        self.assertEqual(props.geometry, "MESH")
+
+    def test_click_left_half_selects_curve(self):
+        r, props = self._make()
+        props.geometry = "MESH"
+        r.on_mouse_press(25, 10)
+        self.assertEqual(props.geometry, "CURVE")
+
+    def test_click_outside_no_change(self):
+        r, props = self._make()
+        r.on_mouse_press(200, 10)
+        self.assertEqual(props.geometry, "CURVE")
+
+    def test_value_reflects_prop(self):
+        r, props = self._make()
+        props.geometry = "MESH"
+        self.assertEqual(r.value, "MESH")
+
+
+class TabBarTests(unittest.TestCase):
+    def _make(self):
+        from geomap_generator.dashboard.widgets import Rect, TabBar
+        return TabBar(Rect(0, 0, 400, 32), ["Location", "Layers", "Output", "History"])
+
+    def test_initial_active_is_zero(self):
+        t = self._make()
+        self.assertEqual(t.active_index, 0)
+
+    def test_click_second_tab(self):
+        t = self._make()
+        # 4 tabs each 100px wide; second tab at x=100..200
+        t.on_mouse_press(150, 16)
+        self.assertEqual(t.active_index, 1)
+
+    def test_click_fourth_tab(self):
+        t = self._make()
+        t.on_mouse_press(350, 16)
+        self.assertEqual(t.active_index, 3)
+
+    def test_click_outside_no_change(self):
+        t = self._make()
+        t.on_mouse_press(0, 100)  # below tab bar
+        self.assertEqual(t.active_index, 0)

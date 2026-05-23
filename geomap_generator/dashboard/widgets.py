@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-__all__ = ["Rect", "UIWidget", "Button", "Toggle", "SliderFloat"]
+__all__ = ["Rect", "UIWidget", "Button", "Toggle", "SliderFloat", "RadioGroup", "TabBar", "ProgressBar", "TextLabel"]
 
 
 @dataclass
@@ -146,3 +146,77 @@ class SliderFloat(UIWidget):
             self._dragging = False
             return True
         return False
+
+
+class RadioGroup(UIWidget):
+    """Horizontal radio group bound to an enum property on a props object."""
+
+    def __init__(
+        self, rect: Rect, props: object, prop_name: str,
+        options: list[tuple[str, str]],
+    ) -> None:
+        super().__init__(rect)
+        self.props = props
+        self.prop_name = prop_name
+        self.options = options  # [(value, label), ...]
+
+    @property
+    def value(self) -> str:
+        """Current string value read from props."""
+        return str(getattr(self.props, self.prop_name, ""))
+
+    def _option_rect(self, index: int) -> Rect:
+        """Return the Rect for option at index."""
+        n = len(self.options) or 1
+        w = self.rect.w / n
+        return Rect(self.rect.x + index * w, self.rect.y, w, self.rect.h)
+
+    def on_mouse_press(self, mx: float, my: float) -> bool:
+        if not self.hit_test(mx, my):
+            return False
+        for i, (val, _) in enumerate(self.options):
+            if self._option_rect(i).contains(mx, my):
+                setattr(self.props, self.prop_name, val)
+                return True
+        return False
+
+
+class TabBar(UIWidget):
+    """Tab bar that switches active_index on click."""
+
+    def __init__(self, rect: Rect, tabs: list[str]) -> None:
+        super().__init__(rect)
+        self.tabs = tabs
+        self.active_index: int = 0
+
+    def _tab_rect(self, index: int) -> Rect:
+        """Return the Rect for tab at index."""
+        n = len(self.tabs) or 1
+        w = self.rect.w / n
+        return Rect(self.rect.x + index * w, self.rect.y, w, self.rect.h)
+
+    def on_mouse_press(self, mx: float, my: float) -> bool:
+        if not self.hit_test(mx, my):
+            return False
+        for i in range(len(self.tabs)):
+            if self._tab_rect(i).contains(mx, my):
+                self.active_index = i
+                return True
+        return False
+
+
+class ProgressBar(UIWidget):
+    """Progress bar displaying a 0..1 value and a status text string."""
+
+    def __init__(self, rect: Rect) -> None:
+        super().__init__(rect)
+        self.progress: float = 0.0
+        self.status: str = ""
+
+
+class TextLabel(UIWidget):
+    """Non-interactive text label."""
+
+    def __init__(self, rect: Rect, text: str) -> None:
+        super().__init__(rect)
+        self.text = text
