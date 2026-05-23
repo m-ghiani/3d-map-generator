@@ -57,6 +57,12 @@ def _load_classes():
     map_selector = importlib.import_module(f"{__name__}.map_selector")
     importlib.reload(map_selector)
 
+    # Reload dashboard submodules in dependency order (widgets/layout/renderer
+    # are pure-Python; modal imports bpy but must be reloaded last so it picks
+    # up the freshly-reloaded widget and layout modules).
+    for dashboard_sub in ("widgets", "renderer", "layout", "modal"):
+        sub = importlib.import_module(f"{__name__}.dashboard.{dashboard_sub}")
+        importlib.reload(sub)
     dashboard = importlib.import_module(f"{__name__}.dashboard")
     importlib.reload(dashboard)
 
