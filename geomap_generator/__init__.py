@@ -34,7 +34,9 @@ def _load_classes():
         "mesh_builder",
         "blender_scene",
         "layer_style",
+        "topology",
         "geometry_payload",
+        "kmz",
         "imagery",
         "dem",
         "overpass",
@@ -43,10 +45,20 @@ def _load_classes():
         "vector_renderer",
         "annotation_renderer",
         "osm_3d",
+        "geocoder",
+        "route_fetcher",
         "service_client",
+        "weather",
+        "weather_renderer",
     ):
         module = importlib.import_module(f"{__name__}.{module_name}")
         importlib.reload(module)
+
+    map_selector = importlib.import_module(f"{__name__}.map_selector")
+    importlib.reload(map_selector)
+
+    dashboard = importlib.import_module(f"{__name__}.dashboard")
+    importlib.reload(dashboard)
 
     operators = importlib.import_module(f"{__name__}.operators")
     panels = importlib.import_module(f"{__name__}.panels")
@@ -56,33 +68,59 @@ def _load_classes():
     panels = importlib.reload(panels)
     properties = importlib.reload(properties)
 
+    from .dashboard.modal import GeoMapDashboardOperator
+    from .map_selector import GeoMapRoutePickerOperator, GeoMapSelectorOperator
     from .operators import (
+        GeoMapAddRouteOperator,
         GeoMapCancelOperator,
         GeoMapClearDownloadCacheOperator,
         GeoMapClearHistoryOperator,
+        GeoMapCreatePlaceLabelOperator,
+        GeoMapDeletePresetOperator,
         GeoMapGenerateOperator,
+        GeoMapImportAllRoutesOperator,
+        GeoMapImportRouteOperator,
+        GeoMapImportSelectedKmzOperator,
         GeoMapImportSelectedPoi3DOperator,
         GeoMapLoadHistoryOperator,
+        GeoMapLoadPresetOperator,
+        GeoMapOpenRoutesPanelOperator,
+        GeoMapRegenerateFromCacheOperator,
+        GeoMapRemoveRouteOperator,
+        GeoMapRenameHistoryOperator,
+        GeoMapSavePresetOperator,
+        GeoMapShowCoordinatesOperator,
+        GeoMapSearchRoutePointOperator,
         GeoMapStoreBasemapTokenOperator,
         GeoMapUpdateLayerOperator,
     )
     from .panels import (
+        GeoMapAnnotationsPanel,
         GeoMapInputPanel,
+        GeoMapKmzPanel,
+        GeoMapLayerVisibilityPanel,
         GeoMapOutputPanel,
         GeoMapPanel,
         GeoMapPoiPanel,
+        GeoMapPresetsPanel,
         GeoMapProgressPanel,
         GeoMapQualityPanel,
+        GeoMapRoutePanel,
         GeoMapSearchHistoryPanel,
         GeoMapTerrainPanel,
         GeoMapUpdatePanel,
         GeoMapVectorPanel,
+        GeoMapWeatherPanel,
     )
-    from .properties import GeoMapAddonPreferences, GeoMapProperties
+    from .properties import GeoMapAddonPreferences, GeoMapProperties, GeoMapRouteItem
 
     return (
+        GeoMapSelectorOperator,
+        GeoMapRoutePickerOperator,
+        GeoMapDashboardOperator,
         GeoMapStoreBasemapTokenOperator,
         GeoMapAddonPreferences,
+        GeoMapRouteItem,
         GeoMapProperties,
         GeoMapPanel,
         GeoMapInputPanel,
@@ -90,18 +128,50 @@ def _load_classes():
         GeoMapVectorPanel,
         GeoMapPoiPanel,
         GeoMapTerrainPanel,
+        GeoMapKmzPanel,
         GeoMapOutputPanel,
+        GeoMapAnnotationsPanel,
         GeoMapUpdatePanel,
+        GeoMapWeatherPanel,
         GeoMapProgressPanel,
         GeoMapSearchHistoryPanel,
+        GeoMapPresetsPanel,
+        GeoMapLayerVisibilityPanel,
+        GeoMapRoutePanel,
         GeoMapGenerateOperator,
+        GeoMapImportRouteOperator,
+        GeoMapAddRouteOperator,
+        GeoMapRemoveRouteOperator,
+        GeoMapImportAllRoutesOperator,
+        GeoMapImportSelectedKmzOperator,
         GeoMapImportSelectedPoi3DOperator,
         GeoMapCancelOperator,
         GeoMapLoadHistoryOperator,
+        GeoMapRenameHistoryOperator,
         GeoMapClearHistoryOperator,
         GeoMapClearDownloadCacheOperator,
+        GeoMapCreatePlaceLabelOperator,
         GeoMapUpdateLayerOperator,
+        GeoMapSearchRoutePointOperator,
+        GeoMapOpenRoutesPanelOperator,
+        GeoMapShowCoordinatesOperator,
+        GeoMapRegenerateFromCacheOperator,
+        GeoMapSavePresetOperator,
+        GeoMapLoadPresetOperator,
+        GeoMapDeletePresetOperator,
     )
+
+
+def _draw_routes_context_menu(self, context):
+    import bpy as _bpy
+    col = _bpy.data.collections.get("GeoMap")
+    if col is not None and col.get("geomap_bbox"):
+        self.layout.separator()
+        self.layout.operator(
+            "geomap.open_routes_popup",
+            text="Add Routes",
+            icon="CURVE_PATH",
+        )
 
 
 def register():
@@ -112,11 +182,13 @@ def register():
     from .properties import GeoMapProperties
 
     bpy.types.Scene.geomap_props = bpy.props.PointerProperty(type=GeoMapProperties)
+    bpy.types.VIEW3D_MT_object_context_menu.append(_draw_routes_context_menu)
 
 
 def unregister():
     import bpy
 
+    bpy.types.VIEW3D_MT_object_context_menu.remove(_draw_routes_context_menu)
     for cls in reversed(_load_classes()):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.geomap_props
