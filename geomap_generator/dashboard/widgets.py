@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-__all__ = ["Rect", "UIWidget", "Button", "Toggle", "SliderFloat", "RadioGroup", "TabBar", "ProgressBar", "TextLabel"]
+__all__ = ["Rect", "UIWidget", "Button", "Toggle", "SliderFloat", "RadioGroup", "TabBar", "ProgressBar", "TextLabel", "LayerRow"]
 
 
 @dataclass
@@ -174,9 +174,10 @@ class RadioGroup(UIWidget):
     def on_mouse_press(self, mx: float, my: float) -> bool:
         if not self.hit_test(mx, my):
             return False
-        for i, (val, _) in enumerate(self.options):
+        # Iterate in reverse so the rightmost option wins boundary ties.
+        for i in range(len(self.options) - 1, -1, -1):
             if self._option_rect(i).contains(mx, my):
-                setattr(self.props, self.prop_name, val)
+                setattr(self.props, self.prop_name, self.options[i][0])
                 return True
         return False
 
@@ -220,3 +221,91 @@ class TextLabel(UIWidget):
     def __init__(self, rect: Rect, text: str) -> None:
         super().__init__(rect)
         self.text = text
+
+
+class LayerRow(UIWidget):
+    """Composite row: Toggle + optional SliderFloat + optional RadioGroup + Button.
+
+    Inline settings (slider, radio) are visible only when toggle is ON (_enabled).
+    """
+
+    _TOGGLE_W: int = 200
+    _BTN_W: int = 90
+    _SLIDER_W: int = 80
+    _RADIO_W: int = 100
+    _GAP: int = 8
+
+    def __init__(
+        self,
+        rect: Rect,
+        label: str,
+        props: object,
+        toggle_prop: str,
+        generate_callback: Callable[[], None],
+        width_prop: Optional[str] = None,
+        width_min: float = 0.0,
+        width_max: float = 0.5,
+        geometry_prop: Optional[str] = None,
+        geometry_options: Optional[list[tuple[str, str]]] = None,
+    ) -> None:
+        super().__init__(rect)
+        self.props = props
+        self.toggle_prop = toggle_prop
+
+        self._toggle = Toggle(
+            Rect(rect.x, rect.y, self._TOGGLE_W, rect.h),
+            label, props, toggle_prop,
+        )
+        self._btn = Button(
+            Rect(rect.x + rect.w - self._BTN_W, rect.y, self._BTN_W, rect.h),
+            "Generate", generate_callback,
+        )
+
+        self._slider: Optional[SliderFloat] = None
+        if width_prop:
+            sx = rect.x + self._TOGGLE_W + self._GAP
+            self._slider = SliderFloat(
+                Rect(sx, rect.y, self._SLIDER_W, rect.h),
+                "width", props, width_prop, width_min, width_max,
+            )
+
+        self._radio: Optional[RadioGroup] = None
+        if geometry_prop and geometry_options:
+            rx = rect.x + self._TOGGLE_W + self._GAP + (
+                self._SLIDER_W + self._GAP if width_prop else 0
+            )
+            self._radio = RadioGroup(
+                Rect(rx, rect.y, self._RADIO_W, rect.h),
+                props, geometry_prop, geometry_options,
+            )
+
+    @property
+    def _enabled(self) -> bool:
+        """True when the layer toggle is ON."""
+        return bool(getattr(self.props, self.toggle_prop, False))
+
+    def _active_widgets(self) -> list[UIWidget]:
+        """Return widgets that should receive events (slider/radio only when enabled)."""
+        result: list[UIWidget] = [self._toggle, self._btn]
+        if self._enabled:
+            if self._slider is not None:
+                result.append(self._slider)
+            if self._radio is not None:
+                result.append(self._radio)
+        return result
+
+    def on_mouse_press(self, mx: float, my: float) -> bool:
+        for w in self._active_widgets():
+            if w.on_mouse_press(mx, my):
+                return True
+        return False
+
+    def on_mouse_release(self, mx: float, my: float) -> bool:
+        for w in self._active_widgets():
+            if w.on_mouse_release(mx, my):
+                return True
+        return False
+
+    def on_mouse_move(self, mx: float, my: float) -> None:
+        for w in self._active_widgets():
+            w.on_mouse_move(mx, my)

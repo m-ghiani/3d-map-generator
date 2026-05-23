@@ -235,3 +235,65 @@ class TabBarTests(unittest.TestCase):
         t = self._make()
         t.on_mouse_press(0, 100)  # below tab bar
         self.assertEqual(t.active_index, 0)
+
+
+class LayerRowTests(unittest.TestCase):
+    def _make(self, enabled=False, with_width=False, with_geometry=False):
+        from geomap_generator.dashboard.widgets import LayerRow, Rect
+        from types import SimpleNamespace
+        called = []
+        props = SimpleNamespace(
+            import_rivers=enabled,
+            river_width=0.06,
+            river_geometry="CURVE",
+        )
+        row = LayerRow(
+            Rect(0, 0, 600, 30),
+            "Rivers",
+            props,
+            "import_rivers",
+            lambda: called.append("gen"),
+            width_prop="river_width" if with_width else None,
+            width_min=0.0,
+            width_max=0.5,
+            geometry_prop="river_geometry" if with_geometry else None,
+            geometry_options=[("CURVE", "Curve"), ("MESH", "Mesh")] if with_geometry else None,
+        )
+        return row, props, called
+
+    def test_toggle_click_enables(self):
+        row, props, _ = self._make(enabled=False)
+        # toggle occupies x=0..200 (LayerRow._TOGGLE_W = 200)
+        row.on_mouse_press(10, 15)
+        self.assertTrue(props.import_rivers)
+
+    def test_generate_btn_fires_when_clicked(self):
+        row, props, called = self._make(enabled=True)
+        # btn at x = 600 - 90 = 510..600 (LayerRow._BTN_W = 90)
+        row.on_mouse_press(550, 15)
+        row.on_mouse_release(550, 15)
+        self.assertEqual(called, ["gen"])
+
+    def test_slider_not_accessible_when_layer_disabled(self):
+        row, props, _ = self._make(enabled=False, with_width=True)
+        # slider at x=208..288; layer disabled → not in active_widgets → no change
+        original = props.river_width
+        row.on_mouse_press(208, 15)
+        self.assertEqual(props.river_width, original)
+
+    def test_slider_accessible_when_layer_enabled(self):
+        row, props, _ = self._make(enabled=True, with_width=True)
+        # slider x=208, w=80 → left edge → value = 0.0
+        row.on_mouse_press(208, 15)
+        self.assertAlmostEqual(props.river_width, 0.0, places=2)
+
+    def test_geometry_radio_accessible_when_enabled(self):
+        row, props, _ = self._make(enabled=True, with_width=False, with_geometry=True)
+        # radio at x=208, w=100 → right half (x=258) → MESH
+        row.on_mouse_press(258, 15)
+        self.assertEqual(props.river_geometry, "MESH")
+
+    def test_geometry_radio_not_accessible_when_disabled(self):
+        row, props, _ = self._make(enabled=False, with_geometry=True)
+        row.on_mouse_press(258, 15)
+        self.assertEqual(props.river_geometry, "CURVE")
