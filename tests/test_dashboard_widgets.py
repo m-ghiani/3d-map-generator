@@ -297,3 +297,59 @@ class LayerRowTests(unittest.TestCase):
         row, props, _ = self._make(enabled=False, with_geometry=True)
         row.on_mouse_press(258, 15)
         self.assertEqual(props.river_geometry, "CURVE")
+
+
+class LayoutTests(unittest.TestCase):
+    def _props(self):
+        return SimpleNamespace(
+            import_relief=False, import_coast=True, import_rivers=False,
+            import_roads=False, import_landuse=False, import_buildings=False,
+            import_cities=False, import_weather=False, add_legend=False,
+            coast_width=0.035, river_width=0.06, road_width=0.045,
+            boundary_width=0.025, river_geometry="CURVE", road_geometry="CURVE",
+            input_mode="COUNTRY",
+        )
+
+    def _tracker(self):
+        return SimpleNamespace(progress=0.0, status="Idle")
+
+    def test_returns_required_keys(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
+        for key in ("tab_bar", "close_btn", "tabs", "gen_btn", "progress_bar", "overlay_rect"):
+            self.assertIn(key, tree)
+
+    def test_has_four_tabs(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
+        self.assertEqual(len(tree["tabs"]), 4)
+
+    def test_layers_tab_has_eight_layer_rows(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        from geomap_generator.dashboard.widgets import LayerRow
+        tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
+        layers_tab = tree["tabs"][1]
+        rows = [w for w in layers_tab if isinstance(w, LayerRow)]
+        self.assertEqual(len(rows), 8)
+
+    def test_progress_bar_reflects_tracker(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        tracker = SimpleNamespace(progress=0.42, status="Fetching DEM")
+        tree = build_widget_tree(self._props(), tracker, 1920, 1080, {})
+        self.assertAlmostEqual(tree["progress_bar"].progress, 0.42)
+        self.assertEqual(tree["progress_bar"].status, "Fetching DEM")
+
+    def test_overlay_centered(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        tree = build_widget_tree(self._props(), self._tracker(), 1000, 800, {})
+        r = tree["overlay_rect"]
+        self.assertAlmostEqual(r.x + r.w / 2, 500, delta=5)
+        self.assertAlmostEqual(r.y + r.h / 2, 400, delta=5)
+
+    def test_callbacks_wired_to_gen_btn(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        fired = []
+        cbs = {"generate_all": lambda: fired.append("all")}
+        tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, cbs)
+        tree["gen_btn"].callback()
+        self.assertEqual(fired, ["all"])
