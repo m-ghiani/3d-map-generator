@@ -21,7 +21,8 @@ from .widgets import (
 )
 
 _TAB_H: int = 34
-_BTM_H: int = 52
+_BTM_H: int = 120   # bottom bar: 68px log area + 38px button row + 14px padding
+_BTN_H: int = 36    # height of gen/abort button and progress bar
 _PAD: int = 14
 _ROW_H: int = 32
 _ROW_GAP: int = 4
@@ -33,6 +34,7 @@ def build_widget_tree(
     viewport_w: int,
     viewport_h: int,
     callbacks: dict[str, Callable],
+    history_entries: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Assemble the full widget tree for the overlay.
 
@@ -41,17 +43,21 @@ def build_widget_tree(
         tracker: ProgressTracker instance (or SimpleNamespace for tests).
         viewport_w / viewport_h: pixel size of the active region.
         callbacks: dict keyed by action name:
-            'generate_all', 'close', 'pick_on_map', 'open_history',
+            'generate_all', 'close', 'pick_on_map',
+            'load_history_N', 'clear_history',
             'gen_TERRAIN', 'gen_COASTLINES', 'gen_RIVERS', 'gen_ROADS',
             'gen_LANDUSE', 'gen_BUILDINGS', 'gen_CITIES', 'gen_WEATHER'
+        history_entries: list of {'label': str, 'index': int} from search cache.
 
     Returns dict with keys:
-        'overlay_rect': Rect — background of entire overlay
+        'overlay_rect': Rect
         'tab_bar': TabBar
         'close_btn': Button
-        'tabs': list[list[UIWidget]] — one list per tab (Location/Layers/Output/History)
+        'tabs': list[list[UIWidget]]
         'gen_btn': Button
         'progress_bar': ProgressBar
+        'log_y': float — y baseline for log line rendering (modal.py draws directly)
+        'sep_btm_y': float — y of bottom separator line
     """
     dash_w = int(viewport_w * 0.82)
     dash_h = int(viewport_h * 0.82)
@@ -72,14 +78,14 @@ def build_widget_tree(
         "×", callbacks.get("close", lambda: None),
     )
 
+    # Button row sits at the top of the bottom bar; log lines fill below it.
+    btn_y = float(dash_y + _BTM_H - _BTN_H - _PAD)
     gen_btn = Button(
-        Rect(float(dash_x + _PAD), float(dash_y + _PAD), 160.0, float(_BTM_H - _PAD)),
+        Rect(float(dash_x + _PAD), btn_y, 160.0, float(_BTN_H)),
         "Generate All", callbacks.get("generate_all", lambda: None),
     )
-
     progress_bar = ProgressBar(
-        Rect(float(dash_x + 182), float(dash_y + _PAD),
-             float(dash_w - 196), float(_BTM_H - _PAD)),
+        Rect(float(dash_x + 182), btn_y, float(dash_w - 196), float(_BTN_H)),
     )
     progress_bar.progress = float(getattr(tracker, "progress", 0.0))
     progress_bar.status = str(getattr(tracker, "status", ""))
@@ -91,7 +97,9 @@ def build_widget_tree(
         _build_location_tab(props, dash_x, content_y, dash_w, content_h, callbacks),
         _build_layers_tab(props, dash_x, content_y, dash_w, content_h, callbacks),
         _build_output_tab(props, dash_x, content_y, dash_w, content_h),
-        _build_history_tab(dash_x, content_y, dash_w, content_h, callbacks),
+        _build_history_tab(
+            history_entries or [], dash_x, content_y, dash_w, content_h, callbacks,
+        ),
     ]
 
     return {
@@ -101,6 +109,8 @@ def build_widget_tree(
         "tabs": tabs,
         "gen_btn": gen_btn,
         "progress_bar": progress_bar,
+        "log_y": float(dash_y + _PAD // 2),
+        "sep_btm_y": float(dash_y + _BTM_H),
     }
 
 
@@ -224,13 +234,44 @@ def _build_output_tab(
 
 
 def _build_history_tab(
-    x: int, y: int, w: int, h: int, callbacks: dict,
+    history_entries: list,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    callbacks: dict,
 ) -> list[UIWidget]:
-    """Build History tab: single button to open search history."""
+    """Build History tab: one load-button per search history entry + Clear."""
+    widgets: list[UIWidget] = []
     px = float(x + _PAD)
+    row_w = float(w - _PAD * 2)
     py = float(y + h - _ROW_H - _PAD)
-    return [Button(
-        Rect(px, py, 220.0, float(_ROW_H)),
-        "Open Search History",
-        callbacks.get("open_history", lambda: None),
-    )]
+    bottom = float(y + _ROW_H + _PAD)
+
+    if not history_entries:
+        widgets.append(TextLabel(
+            Rect(px, py, row_w, float(_ROW_H)),
+            "No search history",
+        ))
+        return widgets
+
+    for entry in history_entries:
+        if py < bottom:
+            break
+        label = str(entry.get("label", "Untitled"))[:48]
+        cb_key = f"load_history_{entry['index']}"
+        widgets.append(Button(
+            Rect(px, py, row_w, float(_ROW_H)),
+            label,
+            callbacks.get(cb_key, lambda: None),
+        ))
+        py -= _ROW_H + _ROW_GAP
+
+    if py >= bottom:
+        py -= _ROW_GAP
+        widgets.append(Button(
+            Rect(px, py, 160.0, float(_ROW_H)),
+            "Clear History",
+            callbacks.get("clear_history", lambda: None),
+        ))
+    return widgets

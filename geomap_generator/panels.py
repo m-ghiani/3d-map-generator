@@ -82,31 +82,11 @@ class GeoMapPanel(Panel):
     bl_region_type = "UI"
     bl_category = "GeoMap"
 
-    def draw(self, context):
-        from .operators import _coord_tracking_active
+    def draw(self, _context):
         layout = self.layout
-        tracker = ProgressTracker.get_instance()
-
-        # Primary action
         row = layout.row()
-        row.scale_y = 1.4
-        if tracker.is_running:
-            row.operator("geomap.cancel_generation", text="● Generating…  ABORT", icon="CANCEL")
-        else:
-            row.operator("geomap.generate", text="Generate All Layers", icon="WORLD")
-
-        # Inline progress when active
-        if tracker.is_running or (tracker.status and tracker.status != "Idle"):
-            box = layout.box()
-            pct = int(tracker.progress * 100)
-            box.label(text=f"{tracker.status}  {pct}%", icon="INFO")
-
-        layout.separator()
-        layout.operator("geomap.open_dashboard", text="Open Dashboard", icon="WINDOW")
-        icon = "HIDE_OFF" if _coord_tracking_active else "EYEDROPPER"
-        text = "Tracking Coordinates (ESC to stop)" if _coord_tracking_active else "Track Coordinates"
-        layout.operator("geomap.show_coordinates", text=text, icon=icon)
-        layout.operator("geomap.import_selected_poi_3d", text="Import Selected POI 3D", icon="EMPTY_DATA")
+        row.scale_y = 2.2
+        row.operator("geomap.open_dashboard", text="Open Dashboard", icon="WINDOW")
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +253,7 @@ class GeoMapPoiPanel(Panel):
             text="Create Text from Selected Markers",
             icon="FONT_DATA",
         )
+        layout.operator("geomap.import_selected_poi_3d", text="Import Selected POI 3D", icon="EMPTY_DATA")
 
 
 # ---------------------------------------------------------------------------

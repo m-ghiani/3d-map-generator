@@ -35,6 +35,9 @@ class GeoMapDashboardOperator(Operator):
     _progress_bar = None
     _close_btn = None
     _overlay_rect: Rect | None = None
+    _log_y: float | None = None
+    _sep_btm_y: float | None = None
+    _generate_cb: Callable | None = None
 
     @classmethod
     def poll(cls, context) -> bool:
@@ -68,11 +71,13 @@ class GeoMapDashboardOperator(Operator):
                 bpy.ops.geomap.update_layer("INVOKE_DEFAULT", layer_kind=kind)
             return _cb
 
-        callbacks = {
-            "generate_all": lambda: bpy.ops.geomap.generate("INVOKE_DEFAULT"),
+        self._generate_cb = lambda: bpy.ops.geomap.generate("INVOKE_DEFAULT")
+
+        callbacks: dict[str, Callable] = {
+            "generate_all": self._generate_cb,
             "close": self._make_close_cb(context),
             "pick_on_map": lambda: bpy.ops.geomap.open_map_selector("INVOKE_DEFAULT"),
-            "open_history": lambda: None,
+            "clear_history": lambda: bpy.ops.geomap.clear_history("INVOKE_DEFAULT"),
             **{
                 f"gen_{k}": _layer_cb(k) for k in (
                     "TERRAIN", "COASTLINES", "RIVERS", "ROADS",
@@ -81,8 +86,25 @@ class GeoMapDashboardOperator(Operator):
             },
         }
 
+        # Load search history (bpy-side: safe here, modal.py owns bpy access).
+        history_entries: list[dict] = []
+        try:
+            from ..search_cache import load_history as _load_history
+            for i, h in enumerate((_load_history() or [])[:12]):
+                label = h.get("label") or h.get("name", "Untitled")
+                history_entries.append({"label": label, "index": i})
+                idx = i
+                callbacks[f"load_history_{idx}"] = (
+                    lambda j=idx: bpy.ops.geomap.load_history(
+                        "INVOKE_DEFAULT", index=j,
+                    )
+                )
+        except Exception:
+            pass
+
         self._tree = build_widget_tree(
             props, tracker, region.width, region.height, callbacks,
+            history_entries=history_entries,
         )
         self._tab_bar = self._tree["tab_bar"]
         self._tabs = self._tree["tabs"]
@@ -90,6 +112,8 @@ class GeoMapDashboardOperator(Operator):
         self._progress_bar = self._tree["progress_bar"]
         self._close_btn = self._tree["close_btn"]
         self._overlay_rect = self._tree["overlay_rect"]
+        self._log_y = self._tree.get("log_y")
+        self._sep_btm_y = self._tree.get("sep_btm_y")
 
     def _make_close_cb(self, context) -> Callable[[], None]:
         """Return a closure that removes the draw handler and exits modal."""
@@ -110,12 +134,21 @@ class GeoMapDashboardOperator(Operator):
         if not self._open:
             return {"FINISHED"}
 
-        # Refresh live progress each tick
+        # Refresh live progress + toggle Generate ↔ Abort each tick
         from ..progress import ProgressTracker
         tracker = ProgressTracker.get_instance()
         if self._progress_bar is not None:
             self._progress_bar.progress = tracker.progress
             self._progress_bar.status = tracker.status or ""
+        if self._gen_btn is not None:
+            if tracker.is_running:
+                self._gen_btn.label = "● ABORT"
+                self._gen_btn.callback = (
+                    lambda: bpy.ops.geomap.cancel_generation("INVOKE_DEFAULT")
+                )
+            else:
+                self._gen_btn.label = "Generate All"
+                self._gen_btn.callback = self._generate_cb
 
         mx = event.mouse_region_x
         my = event.mouse_region_y
@@ -188,13 +221,33 @@ class GeoMapDashboardOperator(Operator):
             if op._overlay_rect is None:
                 return
             r = op._overlay_rect
+
             # Overlay background
             draw_rect(r.x, r.y, r.w, r.h, (0.07, 0.07, 0.07, 0.93))
+
             # Separators
-            draw_rect(r.x, r.y + 52.0, r.w, 1.0, (0.25, 0.25, 0.25, 1.0))
+            sep_btm = op._sep_btm_y if op._sep_btm_y is not None else r.y + 120.0
+            draw_rect(r.x, sep_btm, r.w, 1.0, (0.25, 0.25, 0.25, 1.0))
             draw_rect(r.x, r.y + r.h - 34.0, r.w, 1.0, (0.25, 0.25, 0.25, 1.0))
+
             # All widgets
             for w in op._all_widgets():
                 w.draw(context)
+
+            # Log lines drawn directly (dynamic, not part of widget tree)
+            from ..progress import ProgressTracker
+            from .renderer import draw_text
+            tracker = ProgressTracker.get_instance()
+            log_y = op._log_y if op._log_y is not None else r.y + 6.0
+            if tracker.error:
+                draw_text(
+                    f"ERROR: {tracker.error[:88]}",
+                    r.x + 14, log_y, 10, (1.0, 0.35, 0.35, 1.0),
+                )
+                log_y += 14.0
+            for msg in (tracker.logs[-4:] if tracker.logs else []):
+                draw_text(msg[:90], r.x + 14, log_y, 10, (0.65, 0.85, 0.65, 1.0))
+                log_y += 14.0
+
         except Exception:
             traceback.print_exc()
