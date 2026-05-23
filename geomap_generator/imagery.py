@@ -1,4 +1,6 @@
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import hashlib
@@ -11,7 +13,17 @@ from .download_cache import cached_bytes, read_index, write_index
 from .exceptions import CancelledGeneration, ProviderError
 from .models import BoundingBox, SatelliteTile
 
-_ARCGIS_BASE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services"
+_ARCGIS_EXPORT_BASE = "https://server.arcgisonline.com/ArcGIS/rest/services"
+_ARCGIS_TILE_BASE = "https://server.arcgisonline.com/ArcGIS/rest/services"
+
+_ARCGIS_WMTS_SERVICES: dict[str, str] = {
+    "SATELLITE": "World_Imagery",
+    "STREETS": "World_Street_Map",
+    "TOPO": "World_Topo_Map",
+    "POLITICAL": "NatGeo_World_Map",
+    "LIGHT_GRAY": "Canvas/World_Light_Gray_Base",
+    "DARK_GRAY": "Canvas/World_Dark_Gray_Base",
+}
 _BASEMAP_PROVIDERS = {
     "AUTO",
     "ARCGIS",
@@ -24,6 +36,7 @@ _BASEMAP_PROVIDERS = {
     "MAXAR",
     "AIRBUS",
 }
+# ArcGIS REST export service paths
 MAP_SERVICE_PATHS: dict[str, str] = {
     "SATELLITE": "World_Imagery/MapServer",
     "STREETS": "World_Street_Map/MapServer",
@@ -31,6 +44,38 @@ MAP_SERVICE_PATHS: dict[str, str] = {
     "POLITICAL": "NatGeo_World_Map/MapServer",
     "LIGHT_GRAY": "Canvas/World_Light_Gray_Base/MapServer",
     "DARK_GRAY": "Canvas/World_Dark_Gray_Base/MapServer",
+}
+_MAPTILER_STYLES: dict[str, str] = {
+    "SATELLITE": "satellite",
+    "STREETS": "streets-v2",
+    "TOPO": "topo-v2",
+    "POLITICAL": "streets-v2",
+    "LIGHT_GRAY": "basic-v2",
+    "DARK_GRAY": "dataviz-dark",
+}
+_MAPBOX_STYLES: dict[str, str] = {
+    "SATELLITE": "satellite-v9",
+    "STREETS": "streets-v12",
+    "TOPO": "outdoors-v12",
+    "POLITICAL": "streets-v12",
+    "LIGHT_GRAY": "light-v11",
+    "DARK_GRAY": "dark-v11",
+}
+_GOOGLE_MAP_TYPES: dict[str, str] = {
+    "SATELLITE": "satellite",
+    "STREETS": "roadmap",
+    "TOPO": "terrain",
+    "POLITICAL": "roadmap",
+    "LIGHT_GRAY": "roadmap",
+    "DARK_GRAY": "roadmap",
+}
+_NASA_GIBS_LAYERS: dict[str, str] = {
+    "SATELLITE": "MODIS_Terra_CorrectedReflectance_TrueColor",
+    "STREETS": "MODIS_Terra_CorrectedReflectance_TrueColor",
+    "TOPO": "MODIS_Terra_CorrectedReflectance_TrueColor",
+    "POLITICAL": "MODIS_Terra_CorrectedReflectance_TrueColor",
+    "LIGHT_GRAY": "MODIS_Terra_CorrectedReflectance_TrueColor",
+    "DARK_GRAY": "MODIS_Terra_CorrectedReflectance_TrueColor",
 }
 _USER_AGENT = "GeoMapGenerator/2.0 (Blender Addon; m.ghiani@gmail.com)"
 _MAX_RESOLUTION = 8192
@@ -46,6 +91,8 @@ _WEB_MERCATOR_MAX_LAT = 85.05112878
 _MIN_RESOLUTION = 256
 _IMAGERY_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 _MAX_TILE_WORKERS = 4
+_HTTP_RETRY_CODES = {429, 500, 502, 503, 504}
+_HTTP_MAX_RETRIES = 3
 
 
 def _bbox_to_entry(bbox: BoundingBox) -> dict[str, float]:
@@ -127,6 +174,33 @@ def _provider_max_export_resolution(provider: str) -> int:
     return _PROVIDER_MAX_EXPORT_RESOLUTION.get(provider, _MAX_EXPORT_RESOLUTION)
 
 
+def _lat_lon_to_wmts_tile(lat: float, lon: float, zoom: int) -> tuple[int, int]:
+    n = 2 ** zoom
+    x = int((lon + 180.0) / 360.0 * n)
+    lat_r = math.radians(max(-85.05, min(85.05, lat)))
+    y = int((1.0 - math.log(math.tan(lat_r) + 1.0 / math.cos(lat_r)) / math.pi) / 2.0 * n)
+    return max(0, min(n - 1, x)), max(0, min(n - 1, y))
+
+
+def _wmts_tile_bbox(tx: int, ty: int, zoom: int) -> BoundingBox:
+    n = 2 ** zoom
+    min_lon = tx / n * 360.0 - 180.0
+    max_lon = (tx + 1) / n * 360.0 - 180.0
+    lat_max = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * ty / n))))
+    lat_min = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (ty + 1) / n))))
+    return BoundingBox(lat_min, min_lon, lat_max, max_lon)
+
+
+def _optimal_wmts_zoom(bbox: BoundingBox, resolution: int) -> int:
+    lat_c = (bbox.min_lat + bbox.max_lat) / 2
+    cos_lat = max(math.cos(math.radians(lat_c)), 0.01)
+    lon_span = max(abs(bbox.max_lon - bbox.min_lon), 1e-9)
+    # target: 2^z tiles across lon_span → ≥ resolution/256 tiles
+    import math as _m
+    z = _m.log2(max(resolution / 256.0 / (lon_span / 360.0 * cos_lat + 1e-9), 1.0))
+    return max(1, min(19, round(z)))
+
+
 class SatelliteImageryClient:
     """Downloads a satellite image for a geographic bounding box."""
 
@@ -167,11 +241,60 @@ class SatelliteImageryClient:
                 ),
             )
 
-        if worker_count == 1:
-            return [fetch_tile((1, tile_bboxes[0]))]
+        effective_provider = "ARCGIS" if provider == "AUTO" else provider
+        try:
+            if worker_count == 1:
+                return [fetch_tile((1, tile_bboxes[0]))]
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                return list(executor.map(fetch_tile, enumerate(tile_bboxes, start=1)))
+        except (ProviderError, Exception) as exc:
+            if effective_provider == "ARCGIS":
+                return self._fetch_arcgis_wmts_tiles(bbox, resolution, map_style, should_cancel)
+            raise
 
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            return list(executor.map(fetch_tile, enumerate(tile_bboxes, start=1)))
+    def _fetch_arcgis_wmts_tiles(
+        self,
+        bbox: BoundingBox,
+        resolution: int,
+        map_style: str,
+        should_cancel: Callable[[], bool] | None,
+    ) -> list[SatelliteTile]:
+        service = _ARCGIS_WMTS_SERVICES.get(map_style, _ARCGIS_WMTS_SERVICES["SATELLITE"])
+        zoom = _optimal_wmts_zoom(bbox, resolution)
+        x_min, y_min = _lat_lon_to_wmts_tile(bbox.max_lat, bbox.min_lon, zoom)
+        x_max, y_max = _lat_lon_to_wmts_tile(bbox.min_lat, bbox.max_lon, zoom)
+        x_lo, x_hi = min(x_min, x_max), max(x_min, x_max)
+        y_lo, y_hi = min(y_min, y_max), max(y_min, y_max)
+
+        tiles: list[SatelliteTile] = []
+        for tx in range(x_lo, x_hi + 1):
+            for ty in range(y_lo, y_hi + 1):
+                self._raise_if_cancelled(should_cancel)
+                tile_bbox = _wmts_tile_bbox(tx, ty, zoom)
+                tile_url = (
+                    f"{_ARCGIS_TILE_BASE}/{service}/MapServer/tile/{zoom}/{ty}/{tx}"
+                )
+                req = urllib.request.Request(
+                    tile_url, headers={"User-Agent": _USER_AGENT}
+                )
+
+                def _fetch(r=req) -> bytes:
+                    with urllib.request.urlopen(r, timeout=30) as resp:
+                        return resp.read()
+
+                tile_bytes = cached_bytes(
+                    "imagery_wmts", tile_url, _IMAGERY_CACHE_TTL_SECONDS, _fetch
+                )
+                tile_path = self._image_output_path(
+                    tile_bbox, 256, map_style, "ARCGIS_WMTS",
+                    f"_z{zoom}_x{tx}_y{ty}"
+                )
+                tile_path.write_bytes(tile_bytes)
+                tiles.append(SatelliteTile(bbox=tile_bbox, image_path=tile_path))
+
+        if not tiles:
+            raise ProviderError("ArcGIS WMTS returned no tiles for the given bbox.")
+        return tiles
 
     def _resolution_tiles_for_bbox(self, bbox: BoundingBox, resolution: int) -> list[BoundingBox]:
         base_tiles = self.tiles_for_bbox(bbox)
@@ -212,7 +335,6 @@ class SatelliteImageryClient:
 
         export_resolution = min(resolution, _provider_max_export_resolution(provider))
         width_px, height_px, mercator_bbox = _image_size_for_bbox(bbox, export_resolution)
-        min_x, min_y, max_x, max_y = mercator_bbox
         url = self._build_imagery_url(
             bbox,
             width_px,
@@ -225,8 +347,22 @@ class SatelliteImageryClient:
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
 
         def fetch() -> bytes:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                return resp.read()
+            import urllib.error as _ue
+            last_exc: Exception | None = None
+            for attempt in range(_HTTP_MAX_RETRIES):
+                try:
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        return resp.read()
+                except _ue.HTTPError as exc:
+                    last_exc = exc
+                    if exc.code not in _HTTP_RETRY_CODES or attempt >= _HTTP_MAX_RETRIES - 1:
+                        raise ProviderError(
+                            f"Imagery provider returned HTTP {exc.code} after "
+                            f"{_HTTP_MAX_RETRIES} attempts. "
+                            "Try a different map style or reduce satellite resolution."
+                        ) from exc
+                    time.sleep(2.0 * (attempt + 1))
+            raise ProviderError(f"Imagery fetch failed: {last_exc}") from last_exc
 
         image_bytes = cached_bytes("imagery", url, _IMAGERY_CACHE_TTL_SECONDS, fetch)
         self._raise_if_cancelled(should_cancel)
@@ -250,76 +386,75 @@ class SatelliteImageryClient:
         tokens: dict[str, str],
     ) -> str:
         provider = "ARCGIS" if provider == "AUTO" else provider
+
         if provider == "ARCGIS":
             min_x, min_y, max_x, max_y = mercator_bbox
-            params = urllib.parse.urlencode(
-                {
-                    "bbox": f"{min_x},{min_y},{max_x},{max_y}",
-                    "bboxSR": "3857",
-                    "imageSR": "3857",
-                    "size": f"{width_px},{height_px}",
-                    "format": "png",
-                    "transparent": "false",
-                    "adjustAspectRatio": "false",
-                    "f": "image",
-                }
-            )
             service_path = MAP_SERVICE_PATHS.get(map_style, MAP_SERVICE_PATHS["SATELLITE"])
-            return f"{_ARCGIS_BASE_URL}/{service_path}/export?{params}"
+            # Use 102100 (ESRI WKID for Web Mercator) — more compatible than EPSG:3857 on older services.
+            # Build URL manually to avoid urlencode percent-encoding commas inside bbox/size values.
+            return (
+                f"{_ARCGIS_EXPORT_BASE}/{service_path}/export"
+                f"?bbox={min_x:.2f},{min_y:.2f},{max_x:.2f},{max_y:.2f}"
+                f"&bboxSR=102100&imageSR=102100"
+                f"&size={width_px},{height_px}&format=jpg&f=image"
+            )
+
+        if provider == "MAPTILER":
+            token = _required_token(tokens, "maptiler", provider)
+            style = _MAPTILER_STYLES.get(map_style, "satellite")
+            params = urllib.parse.urlencode({"key": token})
+            return (
+                f"https://api.maptiler.com/maps/{style}/static/"
+                f"{bbox.min_lon},{bbox.min_lat},{bbox.max_lon},{bbox.max_lat}"
+                f"/{width_px}x{height_px}.png?{params}"
+            )
+
         if provider == "MAPBOX":
             token = _required_token(tokens, "mapbox", provider)
-            params = urllib.parse.urlencode({"access_token": token})
+            style = _MAPBOX_STYLES.get(map_style, "satellite-v9")
             bbox_expr = urllib.parse.quote(
                 f"[{bbox.min_lon},{bbox.min_lat},{bbox.max_lon},{bbox.max_lat}]",
                 safe="[],.-",
             )
+            params = urllib.parse.urlencode({"access_token": token})
             return (
-                "https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static/"
-                f"{bbox_expr}"
-                f"/{width_px}x{height_px}?{params}"
+                f"https://api.mapbox.com/styles/v1/mapbox/{style}/static/"
+                f"{bbox_expr}/{width_px}x{height_px}?{params}"
             )
-        if provider == "MAPTILER":
-            token = _required_token(tokens, "maptiler", provider)
-            center_lat = (bbox.min_lat + bbox.max_lat) / 2
-            center_lon = (bbox.min_lon + bbox.max_lon) / 2
-            zoom = _static_zoom_for_bbox(bbox)
-            params = urllib.parse.urlencode({"key": token})
-            return (
-                "https://api.maptiler.com/maps/satellite/static/"
-                f"{center_lon},{center_lat},{zoom}/{width_px}x{height_px}.png?{params}"
-            )
+
         if provider == "GOOGLE":
             token = _required_token(tokens, "google", provider)
             center_lat = (bbox.min_lat + bbox.max_lat) / 2
             center_lon = (bbox.min_lon + bbox.max_lon) / 2
             zoom = _static_zoom_for_bbox(bbox)
-            params = urllib.parse.urlencode(
-                {
-                    "center": f"{center_lat},{center_lon}",
-                    "zoom": str(zoom),
-                    "size": f"{min(width_px, 640)}x{min(height_px, 640)}",
-                    "maptype": "satellite",
-                    "format": "png",
-                    "key": token,
-                }
-            )
+            map_type = _GOOGLE_MAP_TYPES.get(map_style, "satellite")
+            params = urllib.parse.urlencode({
+                "center": f"{center_lat},{center_lon}",
+                "zoom": str(zoom),
+                "size": f"{min(width_px, 640)}x{min(height_px, 640)}",
+                "maptype": map_type,
+                "format": "png",
+                "key": token,
+            })
             return f"https://maps.googleapis.com/maps/api/staticmap?{params}"
+
         if provider == "NASA_GIBS":
-            params = urllib.parse.urlencode(
-                {
-                    "SERVICE": "WMS",
-                    "REQUEST": "GetMap",
-                    "VERSION": "1.3.0",
-                    "LAYERS": "MODIS_Terra_CorrectedReflectance_TrueColor",
-                    "CRS": "EPSG:4326",
-                    "BBOX": f"{bbox.min_lat},{bbox.min_lon},{bbox.max_lat},{bbox.max_lon}",
-                    "WIDTH": str(width_px),
-                    "HEIGHT": str(height_px),
-                    "FORMAT": "image/png",
-                    "TRANSPARENT": "false",
-                }
-            )
+            # WMS 1.3.0 with EPSG:4326 — axis order is lat,lon for geographic CRS
+            layer = _NASA_GIBS_LAYERS.get(map_style, _NASA_GIBS_LAYERS["SATELLITE"])
+            params = urllib.parse.urlencode({
+                "SERVICE": "WMS",
+                "REQUEST": "GetMap",
+                "VERSION": "1.3.0",
+                "LAYERS": layer,
+                "CRS": "EPSG:4326",
+                "BBOX": f"{bbox.min_lat},{bbox.min_lon},{bbox.max_lat},{bbox.max_lon}",
+                "WIDTH": str(width_px),
+                "HEIGHT": str(height_px),
+                "FORMAT": "image/png",
+                "TRANSPARENT": "false",
+            })
             return f"https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?{params}"
+
         if provider in {"SENTINEL_HUB", "PLANET", "MAXAR", "AIRBUS"}:
             _required_token(tokens, provider.lower(), provider)
             raise ProviderError(
@@ -367,7 +502,10 @@ class SatelliteImageryClient:
             area = max(cached_bbox.lat_span() * cached_bbox.lon_span(), 0.0)
             if best is None or area < best[0]:
                 best = (area, path)
-        return best[1] if best else None
+        if best is None:
+            return None
+        _score, best_path = best
+        return best_path
 
     @staticmethod
     def _store_image_index(

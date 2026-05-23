@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Callable
 
-from .layer_style import base_width_for_layer, width_for_way
-from .mesh_builder import BboxProjector, LineMeshBuilder, RibbonMeshBuilder
+from .layer_style import base_width_for_layer, z_offset_for_layer
+from .mesh_builder import BboxProjector
 from .models import BoundingBox, GeoMapData
 from .scene_units import SceneScale, scaled_map_value
 
@@ -53,46 +53,11 @@ def build_vector_payload(
     settings,
     dem_sampler,
     scene_scale: SceneScale | None,
-) -> VectorMeshPayload | VectorCurvePayload | None:
+) -> VectorCurvePayload | None:
     base_width = scaled_map_value(base_width_for_layer(settings, layer_key), scene_scale)
-    z_provider = dem_sampler.sample_z if dem_sampler and settings.drape_vectors_on_dem else None
-    if _should_create_curve(settings, layer_key) and base_width > 0.0:
-        return _build_curve_payload(
-            layer_key,
-            object_name,
-            layer_data,
-            settings,
-            base_width,
-            z_provider,
-            scene_scale,
-        )
-    if base_width > 0.0:
-        verts, edges, faces = RibbonMeshBuilder().build(
-            layer_data,
-            settings.detail_level,
-            lambda way: scaled_map_value(
-                width_for_way(settings, layer_key, getattr(way, "tags", {})),
-                scene_scale,
-            ),
-            z_offset=scaled_map_value(settings.vector_z_offset, scene_scale),
-            z_provider=z_provider,
-        )
-        geometry_type = "MESH"
-    else:
-        verts, edges, faces = LineMeshBuilder().build(layer_data, settings.detail_level)
-        geometry_type = "MESH"
-    if not verts:
+    if base_width <= 0.0:
         return None
-    return VectorMeshPayload(
-        layer_key=layer_key,
-        object_name=object_name,
-        way_count=len(layer_data.ways),
-        ribbon_width=base_width,
-        geometry_type=geometry_type,
-        verts=verts,
-        edges=edges,
-        faces=faces,
-    )
+    return _build_curve_payload(layer_key, object_name, layer_data, settings, base_width, scene_scale)
 
 
 def _build_curve_payload(
@@ -101,25 +66,24 @@ def _build_curve_payload(
     layer_data: GeoMapData,
     settings,
     base_width: float,
-    z_provider: Callable[[float, float], float] | None,
     scene_scale: SceneScale | None,
 ) -> VectorCurvePayload | None:
+    from .topology import merge_ways_by_topology
+
     projector = BboxProjector(layer_data.bbox, settings.detail_level)
+    z_offset = scaled_map_value(
+        settings.vector_z_offset + z_offset_for_layer(layer_key), scene_scale
+    )
+    ways = merge_ways_by_topology(layer_data.ways)
     splines = []
-    for way in layer_data.ways:
+    for way in ways:
         if len(way.geometry) < 2:
             continue
-        points = []
-        for node in way.geometry:
-            terrain_z = z_provider(node.lat, node.lon) if z_provider else 0.0
-            x, y, z = projector.project(
-                node.lat,
-                node.lon,
-                z=terrain_z + scaled_map_value(settings.vector_z_offset, scene_scale),
-            )
-            points.append((x, y, z, 1.0))
-        if points:
-            splines.append(points)
+        points = [
+            (*projector.project(node.lat, node.lon, z=z_offset), 1.0)
+            for node in way.geometry
+        ]
+        splines.append(points)
     if not splines:
         return None
     return VectorCurvePayload(
@@ -232,9 +196,3 @@ def _simplify_ring(geometry, max_vertices: int):
     return simplified if len(simplified) >= 3 else geometry[:max_vertices]
 
 
-def _should_create_curve(settings, layer_key: str) -> bool:
-    if layer_key.startswith("roads_"):
-        return settings.road_geometry == "CURVE"
-    if layer_key.startswith("rivers_"):
-        return settings.river_geometry == "CURVE"
-    return False

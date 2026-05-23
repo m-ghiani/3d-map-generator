@@ -20,6 +20,9 @@ class ProviderSettings:
     planet_token: str = ""
     maxar_token: str = ""
     airbus_token: str = ""
+    weather_provider: str = "AUTO"
+    openweathermap_token: str = ""
+    weatherapi_token: str = ""
 
     @classmethod
     def from_preferences(cls, prefs) -> "ProviderSettings":
@@ -38,15 +41,24 @@ class ProviderSettings:
             road_provider=getattr(prefs, "road_provider", "AUTO"),
             admin_provider=getattr(prefs, "admin_provider", "AUTO"),
             basemap_provider=getattr(prefs, "basemap_provider", "AUTO"),
-            maptiler_token=decrypt_token(getattr(prefs, "maptiler_token_encrypted", "")),
-            mapbox_token=decrypt_token(getattr(prefs, "mapbox_token_encrypted", "")),
-            google_token=decrypt_token(getattr(prefs, "google_token_encrypted", "")),
+            maptiler_token=decrypt_token(getattr(prefs, "maptiler_token_encrypted", ""), "maptiler_token_encrypted"),
+            mapbox_token=decrypt_token(getattr(prefs, "mapbox_token_encrypted", ""), "mapbox_token_encrypted"),
+            google_token=decrypt_token(getattr(prefs, "google_token_encrypted", ""), "google_token_encrypted"),
             sentinel_hub_token=decrypt_token(
-                getattr(prefs, "sentinel_hub_token_encrypted", "")
+                getattr(prefs, "sentinel_hub_token_encrypted", ""), "sentinel_hub_token_encrypted"
             ),
-            planet_token=decrypt_token(getattr(prefs, "planet_token_encrypted", "")),
-            maxar_token=decrypt_token(getattr(prefs, "maxar_token_encrypted", "")),
-            airbus_token=decrypt_token(getattr(prefs, "airbus_token_encrypted", "")),
+            planet_token=decrypt_token(getattr(prefs, "planet_token_encrypted", ""), "planet_token_encrypted"),
+            maxar_token=decrypt_token(getattr(prefs, "maxar_token_encrypted", ""), "maxar_token_encrypted"),
+            airbus_token=decrypt_token(getattr(prefs, "airbus_token_encrypted", ""), "airbus_token_encrypted"),
+            weather_provider=getattr(prefs, "weather_provider", "AUTO"),
+            openweathermap_token=decrypt_token(
+                getattr(prefs, "openweathermap_token_encrypted", ""),
+                "openweathermap_token_encrypted",
+            ),
+            weatherapi_token=decrypt_token(
+                getattr(prefs, "weatherapi_token_encrypted", ""),
+                "weatherapi_token_encrypted",
+            ),
         )
 
 
@@ -81,6 +93,9 @@ class GenerationSettings:
     import_admin: bool
     import_buildings: bool
     import_cities: bool
+    import_place_labels: bool
+    place_label_min_type: str
+    place_label_size_factor: float
     import_poi_historic: bool
     import_poi_cultural: bool
     import_poi_administrative: bool
@@ -89,6 +104,19 @@ class GenerationSettings:
     import_satellite: bool
     map_style: str
     satellite_resolution: int
+    create_map_box: bool
+    map_box_depth: float
+    height_exaggeration: float
+    auto_lod: bool
+    import_landuse: bool = False
+    import_contours: bool = False
+    contour_interval_m: float = 50.0
+    dem_slope_colors: bool = False
+    add_north_arrow: bool = False
+    import_weather: bool = False
+    weather_show_temperature: bool = True
+    weather_show_wind: bool = True
+    weather_grid_size: int = 3
 
     @classmethod
     def from_props(cls, props) -> "GenerationSettings":

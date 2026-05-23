@@ -206,6 +206,16 @@ def _build_layers_tab(
         ))
         py -= _ROW_H + _ROW_GAP
 
+        if label == "Cities/POI":
+            # Sub-button: generate a text label from the currently selected POI object
+            sub_h = _ROW_H - 6
+            widgets.append(Button(
+                Rect(px + 24, py, 260.0, float(sub_h)),
+                "↳ Create Label from Selected POI",
+                callbacks.get("create_place_label", lambda: None),
+            ))
+            py -= sub_h + _ROW_GAP
+
     return widgets
 
 

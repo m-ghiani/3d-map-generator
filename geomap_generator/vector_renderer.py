@@ -2,15 +2,24 @@ import json
 
 import bpy
 
-from .blender_scene import link_to_geomap_collection, material_named, set_active
+from .blender_scene import (
+    get_or_create_curve_profile,
+    link_to_geomap_collection,
+    material_named,
+    set_active,
+)
 from .layer_style import (
     base_width_for_layer,
     collection_name_for_layer,
     color_for_layer,
-    width_for_way,
+    z_offset_for_layer,
 )
 from .geometry_payload import VectorCurvePayload, VectorMeshPayload
-from .mesh_builder import BboxProjector, DemHeightSampler, LineMeshBuilder, RibbonMeshBuilder
+from .mesh_builder import (
+    BboxProjector,
+    DemHeightSampler,
+    PolygonFillBuilder,
+)
 from .models import GeoMapData, OsmWay
 from .scene_units import SceneScale, scaled_map_value
 from .threading_utils import assert_main_thread
@@ -114,6 +123,46 @@ class VectorRenderer:
             created.append(obj)
         return created
 
+    def render_landuse(
+        self,
+        context,
+        landuse_layers: list[tuple[str, str, GeoMapData]],
+        settings,
+        dem_sampler: DemHeightSampler | None,
+        scene_scale: SceneScale | None = None,
+    ) -> list:
+        assert_main_thread()
+        objects = []
+        z_offset = scaled_map_value(-0.005, scene_scale)
+        for layer_key, layer_name, layer_data in landuse_layers:
+            if not layer_data.ways:
+                continue
+            z_provider = (
+                dem_sampler.sample_z if dem_sampler and settings.drape_vectors_on_dem else None
+            )
+            verts, _, faces = PolygonFillBuilder().build(
+                layer_data,
+                settings.detail_level,
+                z_offset=z_offset,
+                z_provider=z_provider,
+            )
+            if not verts:
+                continue
+            mesh = bpy.data.meshes.new(f"{layer_name}_Mesh")
+            obj = bpy.data.objects.new(layer_name, mesh)
+            link_to_geomap_collection(context, obj, "LandUse")
+            mesh.from_pydata(verts, [], faces)
+            mesh.update()
+            color = color_for_layer(layer_key)
+            obj.data.materials.append(
+                material_named(f"GeoMap_{layer_key}_Material", color)
+            )
+            obj["geomap_layer"] = layer_key
+            obj["geomap_way_count"] = len(layer_data.ways)
+            obj["geomap_geometry_type"] = "POLYGON"
+            objects.append(obj)
+        return objects
+
     def _create_vector_layer_object(
         self,
         context,
@@ -126,54 +175,17 @@ class VectorRenderer:
         active: bool,
     ):
         base_width = scaled_map_value(base_width_for_layer(settings, layer_key), scene_scale)
-        z_provider = (
-            dem_sampler.sample_z if dem_sampler and settings.drape_vectors_on_dem else None
-        )
-        if self._should_create_curve(settings, layer_key) and base_width > 0.0:
-            return self._create_curve_layer_object(
-                context,
-                layer_data,
-                settings,
-                layer_key,
-                object_name,
-                z_provider,
-                scene_scale,
-                active,
-            )
-        if base_width > 0.0:
-            verts, edges, faces = RibbonMeshBuilder().build(
-                layer_data,
-                settings.detail_level,
-                lambda way: scaled_map_value(
-                    width_for_way(settings, layer_key, getattr(way, "tags", {})),
-                    scene_scale,
-                ),
-                z_offset=scaled_map_value(settings.vector_z_offset, scene_scale),
-                z_provider=z_provider,
-            )
-        else:
-            verts, edges, faces = LineMeshBuilder().build(layer_data, settings.detail_level)
-        if not verts:
+        if base_width <= 0.0:
             return None
-
-        mesh = bpy.data.meshes.new(f"{object_name}_Mesh")
-        obj = bpy.data.objects.new(object_name, mesh)
-        link_to_geomap_collection(context, obj, collection_name_for_layer(layer_key))
-        if active:
-            set_active(context, obj)
-        mesh.from_pydata(verts, edges, faces)
-        mesh.update()
-        obj.data.materials.append(
-            material_named(
-                f"GeoMap_{collection_name_for_layer(layer_key)}_Material",
-                color_for_layer(layer_key),
-            )
+        return self._create_curve_layer_object(
+            context,
+            layer_data,
+            settings,
+            layer_key,
+            object_name,
+            scene_scale,
+            active,
         )
-        obj["geomap_layer"] = layer_key
-        obj["geomap_way_count"] = len(layer_data.ways)
-        obj["geomap_ribbon_width"] = base_width
-        obj["geomap_geometry_type"] = "MESH"
-        return obj
 
     def _commit_mesh_payload(self, context, payload: VectorMeshPayload, active: bool):
         if not payload.verts:
@@ -203,9 +215,10 @@ class VectorRenderer:
         curve = bpy.data.curves.new(f"{payload.object_name}_Curve", "CURVE")
         curve.dimensions = "3D"
         curve.resolution_u = 2
-        curve.bevel_depth = payload.curve_width / 2.0
-        curve.bevel_resolution = 2
         curve.fill_mode = "FULL"
+        profile = get_or_create_curve_profile(context, payload.layer_key, payload.curve_width / 2.0)
+        curve.bevel_mode = "OBJECT"
+        curve.bevel_object = profile
         for points in payload.splines:
             if len(points) < 2:
                 continue
@@ -236,7 +249,6 @@ class VectorRenderer:
         settings,
         layer_key: str,
         object_name: str,
-        z_provider,
         scene_scale: SceneScale | None,
         active: bool,
     ):
@@ -247,17 +259,19 @@ class VectorRenderer:
         curve = bpy.data.curves.new(f"{object_name}_Curve", "CURVE")
         curve.dimensions = "3D"
         curve.resolution_u = 2
-        curve.bevel_depth = base_width / 2.0
-        curve.bevel_resolution = 2
         curve.fill_mode = "FULL"
+        profile = get_or_create_curve_profile(context, layer_key, base_width / 2.0)
+        curve.bevel_mode = "OBJECT"
+        curve.bevel_object = profile
 
         projector = BboxProjector(layer_data.bbox, settings.detail_level)
+        z_offset = scaled_map_value(
+            settings.vector_z_offset + z_offset_for_layer(layer_key), scene_scale
+        )
 
         created_count = 0
         for way in layer_data.ways:
-            if not self._add_way_spline(
-                curve, projector, settings, way, z_provider, scene_scale
-            ):
+            if not self._add_way_spline(curve, projector, way, z_offset):
                 continue
             created_count += 1
 
@@ -281,35 +295,19 @@ class VectorRenderer:
         return obj
 
     @staticmethod
-    def _add_way_spline(
-        curve,
-        projector: BboxProjector,
-        settings,
-        way: OsmWay,
-        z_provider,
-        scene_scale: SceneScale | None,
-    ):
+    def _add_way_spline(curve, projector: BboxProjector, way: OsmWay, z_offset: float):
         if len(way.geometry) < 2:
             return False
         spline = curve.splines.new("POLY")
         spline.points.add(len(way.geometry) - 1)
         for point, node in zip(spline.points, way.geometry):
-            terrain_z = z_provider(node.lat, node.lon) if z_provider else 0.0
-            x, y, z = projector.project(
-                node.lat,
-                node.lon,
-                z=terrain_z + scaled_map_value(settings.vector_z_offset, scene_scale),
-            )
+            x, y, z = projector.project(node.lat, node.lon, z=z_offset)
             point.co = (x, y, z, 1.0)
         return True
 
     @staticmethod
     def _should_create_curve(settings, layer_key: str) -> bool:
-        if layer_key.startswith("roads_"):
-            return settings.road_geometry == "CURVE"
-        if layer_key.startswith("rivers_"):
-            return settings.river_geometry == "CURVE"
-        return False
+        return True
 
     @staticmethod
     def _safe_object_name(name: str) -> str:

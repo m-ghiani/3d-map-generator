@@ -9,6 +9,16 @@ from typing import Callable
 
 _STATS = {"hits": 0, "misses": 0, "stale_hits": 0, "writes": 0}
 _CACHE_ROOT: Path | None = None
+_OFFLINE_MODE = False
+
+
+def set_offline_mode(enabled: bool) -> None:
+    global _OFFLINE_MODE
+    _OFFLINE_MODE = enabled
+
+
+def is_offline_mode() -> bool:
+    return _OFFLINE_MODE
 
 
 def configure_blender_cache_root() -> None:
@@ -136,6 +146,14 @@ def cached_bytes(
             _STATS["hits"] += 1
             return data
 
+    if _OFFLINE_MODE:
+        if path and path.exists():
+            data = path.read_bytes()
+            if data:
+                _STATS["stale_hits"] += 1
+                return data
+        raise RuntimeError(f"Offline mode: no cached data for {namespace}/{key[:32]}")
+
     _STATS["misses"] += 1
     try:
         data = fetch()
@@ -171,6 +189,17 @@ def cached_json(
                 return data
         except Exception:
             pass
+
+    if _OFFLINE_MODE:
+        if path and path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    _STATS["stale_hits"] += 1
+                    return data
+            except Exception:
+                pass
+        raise RuntimeError(f"Offline mode: no cached data for {namespace}/{key[:32]}")
 
     _STATS["misses"] += 1
     try:

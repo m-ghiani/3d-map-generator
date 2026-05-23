@@ -7,6 +7,7 @@ from typing import Any
 
 _MAX_HISTORY = 10
 _HISTORY_PATH: Path | None = None
+_PRESETS_PATH: Path | None = None
 
 
 def configure_blender_history_path() -> None:
@@ -120,6 +121,8 @@ def snapshot_from_props(props) -> dict[str, Any]:
         "import_satellite": props.import_satellite,
         "map_style": props.map_style,
         "satellite_resolution": props.satellite_resolution,
+        "dem_slope_colors": value("dem_slope_colors", False),
+        "add_north_arrow": value("add_north_arrow", False),
     }
 
 
@@ -140,6 +143,52 @@ def add_search(snapshot: dict[str, Any]) -> None:
         )
     ]
     save_history([snapshot, *deduped])
+
+
+def _presets_path() -> Path:
+    if _PRESETS_PATH is not None:
+        return _PRESETS_PATH
+    try:
+        import bpy
+        base = Path(bpy.utils.user_resource("CONFIG", path="geomap_generator", create=True))
+    except Exception:
+        base = _fallback_config_dir()
+    return base / "map_presets.json"
+
+
+def load_presets() -> list[dict[str, Any]]:
+    path = _presets_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_preset(name: str, snapshot: dict[str, Any]) -> None:
+    presets = [p for p in load_presets() if p.get("preset_name") != name]
+    preset = {**snapshot, "preset_name": name, "label": name}
+    path = _presets_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([preset, *presets], indent=2), encoding="utf-8")
+
+
+def delete_preset(name: str) -> None:
+    presets = [p for p in load_presets() if p.get("preset_name") != name]
+    path = _presets_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(presets, indent=2), encoding="utf-8")
+
+
+def rename_history_entry(index: int, new_label: str) -> bool:
+    history = load_history()
+    if not 0 <= index < len(history):
+        return False
+    history[index]["label"] = new_label
+    save_history(history)
+    return True
 
 
 def apply_snapshot(props, snapshot: dict[str, Any]) -> None:

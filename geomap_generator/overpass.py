@@ -234,6 +234,7 @@ class OsmApiClient:
         poi_cultural: bool = False,
         poi_administrative: bool = False,
         poi_natural: bool = False,
+        landuse: bool = False,
         provider: str = "AUTO",
         progress: Callable[[str, float], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
@@ -256,6 +257,7 @@ class OsmApiClient:
                 poi_cultural=poi_cultural,
                 poi_administrative=poi_administrative,
                 poi_natural=poi_natural,
+                landuse=landuse,
                 provider=provider,
                 progress=progress,
                 should_cancel=should_cancel,
@@ -273,6 +275,7 @@ class OsmApiClient:
             poi_cultural=poi_cultural,
             poi_administrative=poi_administrative,
             poi_natural=poi_natural,
+            landuse=landuse,
             provider=provider,
             progress=progress,
             should_cancel=should_cancel,
@@ -293,6 +296,7 @@ class OsmApiClient:
         poi_cultural: bool,
         poi_administrative: bool,
         poi_natural: bool,
+        landuse: bool = False,
         provider: str,
         progress: Callable[[str, float], None] | None,
         should_cancel: Callable[[], bool] | None,
@@ -317,6 +321,7 @@ class OsmApiClient:
                 poi_cultural=poi_cultural,
                 poi_administrative=poi_administrative,
                 poi_natural=poi_natural,
+                landuse=landuse,
                 provider=provider,
                 progress=None,
                 should_cancel=should_cancel,
@@ -348,6 +353,7 @@ class OsmApiClient:
         poi_cultural: bool = False,
         poi_administrative: bool = False,
         poi_natural: bool = False,
+        landuse: bool = False,
         provider: str = "AUTO",
         progress: Callable[[str, float], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
@@ -365,6 +371,7 @@ class OsmApiClient:
             poi_cultural=poi_cultural,
             poi_administrative=poi_administrative,
             poi_natural=poi_natural,
+            landuse=landuse,
         )
         if progress:
             progress("Sending Overpass request...", 0.40)
@@ -417,15 +424,25 @@ class OsmApiClient:
                     with urllib.request.urlopen(req, timeout=120) as resp:
                         return json.loads(resp.read().decode("utf-8"))
 
-                return cached_json(
+                data = cached_json(
                     "overpass",
                     f"{url}|{query}",
                     _OVERPASS_CACHE_TTL_SECONDS,
                     fetch,
                 )
+                remark = data.get("remark", "") if isinstance(data, dict) else ""
+                if remark and any(
+                    k in remark.lower()
+                    for k in ("runtime error", "out of memory", "timed out")
+                ):
+                    raise RuntimeError(
+                        f"Overpass query too large: {remark[:200]}. "
+                        "Reduce the bounding box or disable some feature types."
+                    )
+                return data
             except urllib.error.HTTPError as e:
                 last_error = e
-                if e.code not in {429, 502, 503, 504}:
+                if e.code not in {429, 500, 502, 503, 504}:
                     raise RuntimeError(f"Overpass HTTP {e.code}: {e.reason}") from e
             except urllib.error.URLError as e:
                 last_error = e
@@ -446,6 +463,7 @@ class OsmApiClient:
         poi_cultural: bool = False,
         poi_administrative: bool = False,
         poi_natural: bool = False,
+        landuse: bool = False,
     ) -> str:
         filters: list[str] = []
         bbox_expr = bbox.to_overpass()
@@ -458,6 +476,7 @@ class OsmApiClient:
             filters.append(f'way["highway"~"^(motorway|trunk|primary)$"]({bbox_expr});')
         if buildings:
             filters.append(f'way["building"]({bbox_expr});')
+            filters.append(f'relation["building"]({bbox_expr});')
         if admin_level == "ALL":
             filters.append(
                 f'way["boundary"="administrative"]["admin_level"~"^(2|4|6|8)$"]({bbox_expr});'
@@ -486,12 +505,21 @@ class OsmApiClient:
             filters.append(
                 f'nwr["natural"~"^(peak|volcano|cave_entrance|spring|waterfall|beach|bay|cliff)$"]["name"]({bbox_expr});'
             )
+        if landuse:
+            filters.append(
+                f'way["landuse"~"^(forest|park|grass|meadow|residential|industrial|commercial|farmland|cemetery)$"]({bbox_expr});'
+            )
+            filters.append(
+                f'way["natural"~"^(wood|water|scrub|wetland|sand|beach)$"]({bbox_expr});'
+            )
+            filters.append(f'way["leisure"="park"]({bbox_expr});')
 
         if not filters:
             raise RuntimeError("Select at least one supported OSM feature to import.")
 
+        timeout = 120 if buildings else 90
         return (
-            "[out:json][timeout:90];\n(\n"
+            f"[out:json][timeout:{timeout}][maxsize:134217728];\n(\n"
             + "\n".join(filters)
             + f"\n);\nout center geom({bbox_expr});"
         )

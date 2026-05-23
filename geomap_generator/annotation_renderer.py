@@ -1,13 +1,41 @@
 import math
+import re
 
 import bpy
 
-from .blender_scene import create_quad_mesh_object, create_text_object, material_named
+from .blender_scene import (
+    create_quad_mesh_object,
+    create_text_object,
+    link_to_geomap_collection,
+    material_named,
+)
 from .layer_style import legend_label
 from .mesh_builder import BboxProjector
-from .models import BoundingBox
+from .models import BoundingBox, OsmPoint
 from .scene_units import SceneScale, scaled_map_value
 from .threading_utils import assert_main_thread
+
+_PLACE_RANK: dict[str, int] = {
+    "capital": 0,
+    "city": 1,
+    "town": 2,
+    "village": 3,
+    "hamlet": 4,
+}
+_PLACE_BASE_SIZE: dict[str, float] = {
+    "capital": 0.30,
+    "city": 0.22,
+    "town": 0.16,
+    "village": 0.12,
+    "hamlet": 0.09,
+}
+_PLACE_COLORS: dict[str, tuple[float, float, float, float]] = {
+    "capital": (0.02, 0.02, 0.05, 1.0),
+    "city": (0.05, 0.05, 0.12, 1.0),
+    "town": (0.10, 0.10, 0.18, 1.0),
+    "village": (0.18, 0.18, 0.25, 1.0),
+    "hamlet": (0.25, 0.25, 0.32, 1.0),
+}
 
 
 class AnnotationRenderer:
@@ -22,6 +50,8 @@ class AnnotationRenderer:
         assert_main_thread()
         self._annotate_root_collection(context, bbox, settings, scene_scale.km_per_bu)
 
+        if getattr(settings, "add_north_arrow", False):
+            self._create_north_arrow(context, bbox, settings.detail_level, scene_scale)
         if settings.add_scale_bar:
             self._create_scale_bar(context, bbox, settings.detail_level, scene_scale)
         if settings.add_legend:
@@ -42,6 +72,56 @@ class AnnotationRenderer:
         root["geomap_output_preset"] = settings.output_preset
         root["geomap_km_per_bu"] = round(km_per_bu, 4)
         root["geomap_scene_unit"] = context.scene.unit_settings.system
+
+    def _create_north_arrow(
+        self,
+        context,
+        bbox: BoundingBox,
+        detail_level: str,
+        scene_scale: SceneScale,
+    ) -> None:
+        projector = BboxProjector(bbox, detail_level)
+        z = scaled_map_value(0.08, scene_scale)
+        x0, y0, _z = projector.project(bbox.max_lat, bbox.max_lon, z=z)
+        pad = scaled_map_value(0.35, scene_scale)
+        cx = x0 - pad
+        cy = y0 - pad
+        s = scaled_map_value(0.12, scene_scale)  # half-width of arrow
+        h = scaled_map_value(0.28, scene_scale)  # total height
+        # Arrow head (upward triangle) + tail rectangle
+        verts = [
+            (cx, cy + h * 0.35, z),        # 0 base-left
+            (cx + s, cy + h * 0.35, z),    # 1 base-right
+            (cx + s, cy + h, z),           # 2 top-right
+            (cx, cy + h, z),               # 3 top-left (stem cap, unused)
+            (cx - s * 0.5, cy + h * 0.35, z),  # 4 arrow left wing
+            (cx + s * 1.5, cy + h * 0.35, z),  # 5 arrow right wing
+            (cx + s * 0.5, cy + h * 1.45, z),  # 6 arrow tip
+        ]
+        # Stem face + arrowhead triangle
+        faces = [(0, 1, 2, 3), (4, 5, 6)]  # stem quad + head triangle
+        create_quad_mesh_object(
+            context,
+            "GeoMap_NorthArrow",
+            verts[:4],
+            "Annotations",
+            material_named("GeoMap_NorthArrow_Material", (0.02, 0.02, 0.05, 1.0)),
+        )
+        arrowhead_verts = [verts[4], verts[5], verts[6]]
+        create_quad_mesh_object(
+            context,
+            "GeoMap_NorthArrow_Head",
+            arrowhead_verts,
+            "Annotations",
+            material_named("GeoMap_NorthArrow_Material", (0.02, 0.02, 0.05, 1.0)),
+        )
+        self._create_text_object(
+            context,
+            "N",
+            (cx + s * 0.5, cy + h * 1.55, z),
+            "GeoMap_NorthArrow_N",
+            size=scaled_map_value(0.18, scene_scale),
+        )
 
     def _create_scale_bar(
         self,
@@ -174,3 +254,93 @@ class AnnotationRenderer:
             if candidate >= value:
                 return candidate
         return 10 * magnitude
+
+
+class PlaceLabelRenderer:
+    def render(
+        self,
+        context,
+        points: list[OsmPoint],
+        bbox: BoundingBox,
+        settings,
+        scene_scale: SceneScale,
+        dem_sampler=None,
+    ) -> list:
+        assert_main_thread()
+        min_rank = _PLACE_RANK.get(settings.place_label_min_type, 2)
+        size_factor = max(float(settings.place_label_size_factor), 0.01)
+        projector = BboxProjector(bbox, settings.detail_level)
+        created = []
+        seen_ids: set[int] = set()
+
+        for point in points:
+            if point.category != "city":
+                continue
+            if point.id in seen_ids:
+                continue
+            place_type = self._place_type(point.tags)
+            if _PLACE_RANK.get(place_type, 99) > min_rank:
+                continue
+            seen_ids.add(point.id)
+            obj = self._create_label(
+                context, point, place_type, projector, settings, scene_scale, dem_sampler, size_factor
+            )
+            if obj:
+                created.append(obj)
+        return created
+
+    @staticmethod
+    def _place_type(tags: dict) -> str:
+        capital = tags.get("capital", "")
+        if capital in {"yes", "2", "4", "6"}:
+            return "capital"
+        place = tags.get("place", "")
+        if place == "city":
+            return "city"
+        if place == "town":
+            return "town"
+        if place == "village":
+            return "village"
+        return "hamlet"
+
+    def _create_label(
+        self,
+        context,
+        point: OsmPoint,
+        place_type: str,
+        projector: BboxProjector,
+        settings,
+        scene_scale: SceneScale,
+        dem_sampler,
+        size_factor: float,
+    ):
+        x, y, _ = projector.project(point.lat, point.lon)
+        z_terrain = (
+            dem_sampler.sample_z(point.lat, point.lon)
+            if dem_sampler and settings.drape_vectors_on_dem
+            else 0.0
+        )
+        z = z_terrain + scaled_map_value(float(settings.vector_z_offset) * 1.5, scene_scale)
+
+        base_size = _PLACE_BASE_SIZE.get(place_type, 0.12)
+        size = max(scaled_map_value(base_size * size_factor, scene_scale), 1e-4)
+
+        safe_name = self._sanitize(point.name)[:24]
+        obj_name = f"GeoMap_Label_{place_type.title()}_{safe_name}"
+
+        obj = bpy.data.objects.new(obj_name, None)
+        obj.location = (x, y, z)
+        obj.empty_display_type = "CIRCLE"
+        obj.empty_display_size = size
+        link_to_geomap_collection(context, obj, "Labels")
+        obj["geomap_layer"] = "place_label"
+        obj["geomap_place_type"] = place_type
+        obj["geomap_name"] = point.name
+        obj["geomap_lat"] = point.lat
+        obj["geomap_lon"] = point.lon
+        obj["geomap_label_text_size"] = size
+        return obj
+
+    @staticmethod
+    def _sanitize(name: str) -> str:
+        return re.sub(r"[^\w\s\-\.\,\'\(\)]", "", name).strip() or "?"

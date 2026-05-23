@@ -78,6 +78,9 @@ class GeoMapDashboardOperator(Operator):
             "close": self._make_close_cb(context),
             "pick_on_map": lambda: bpy.ops.geomap.open_map_selector("INVOKE_DEFAULT"),
             "clear_history": lambda: bpy.ops.geomap.clear_history("INVOKE_DEFAULT"),
+            "create_place_label": (
+                lambda: bpy.ops.geomap.create_place_label("INVOKE_DEFAULT")
+            ),
             **{
                 f"gen_{k}": _layer_cb(k) for k in (
                     "TERRAIN", "COASTLINES", "RIVERS", "ROADS",
