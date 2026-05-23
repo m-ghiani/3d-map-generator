@@ -123,3 +123,56 @@ class ToggleTests(unittest.TestCase):
         props = SimpleNamespace(enabled=True)
         t = Toggle(Rect(0, 0, 30, 30), "Enable", props, "enabled")
         self.assertTrue(t.value)
+
+
+class SliderFloatTests(unittest.TestCase):
+    def _make(self, initial: float = 0.5):
+        from geomap_generator.dashboard.widgets import Rect, SliderFloat
+        from types import SimpleNamespace
+        props = SimpleNamespace(width=initial)
+        s = SliderFloat(Rect(0, 0, 100, 20), "Width", props, "width", 0.0, 1.0)
+        return s, props
+
+    def test_press_center_sets_half(self):
+        s, props = self._make()
+        s.on_mouse_press(50, 10)
+        self.assertAlmostEqual(props.width, 0.5, places=2)
+
+    def test_press_left_edge_sets_min(self):
+        s, props = self._make()
+        s.on_mouse_press(0, 10)
+        self.assertAlmostEqual(props.width, 0.0, places=2)
+
+    def test_press_right_edge_sets_max(self):
+        s, props = self._make()
+        s.on_mouse_press(100, 10)
+        self.assertAlmostEqual(props.width, 1.0, places=2)
+
+    def test_drag_updates_value(self):
+        s, props = self._make(0.0)
+        s.on_mouse_press(0, 10)
+        s.on_mouse_move(75, 10)
+        self.assertAlmostEqual(props.width, 0.75, places=2)
+
+    def test_clamps_below_min(self):
+        s, props = self._make()
+        s.on_mouse_press(-50, 10)
+        self.assertAlmostEqual(props.width, 0.0, places=2)
+
+    def test_clamps_above_max(self):
+        s, props = self._make()
+        s.on_mouse_press(200, 10)
+        self.assertAlmostEqual(props.width, 1.0, places=2)
+
+    def test_no_drag_after_release(self):
+        s, props = self._make(0.0)
+        s.on_mouse_press(0, 10)
+        s.on_mouse_release(0, 10)
+        s.on_mouse_move(100, 10)
+        self.assertAlmostEqual(props.width, 0.0, places=2)
+
+    def test_press_outside_no_drag(self):
+        s, props = self._make(0.0)
+        s.on_mouse_press(200, 10)  # outside rect
+        s.on_mouse_move(50, 10)
+        self.assertAlmostEqual(props.width, 0.0, places=2)

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-__all__ = ["Rect", "UIWidget", "Button", "Toggle"]
+__all__ = ["Rect", "UIWidget", "Button", "Toggle", "SliderFloat"]
 
 
 @dataclass
@@ -96,5 +96,53 @@ class Toggle(UIWidget):
     def on_mouse_press(self, mx: float, my: float) -> bool:
         if self.hit_test(mx, my):
             setattr(self.props, self.prop_name, not self.value)
+            return True
+        return False
+
+
+class SliderFloat(UIWidget):
+    """Horizontal drag slider bound to a float property on a props object."""
+
+    def __init__(
+        self, rect: Rect, label: str, props: object, prop_name: str,
+        min_val: float, max_val: float,
+    ) -> None:
+        super().__init__(rect)
+        self.label = label
+        self.props = props
+        self.prop_name = prop_name
+        self.min_val = min_val
+        self.max_val = max_val
+        self._dragging: bool = False
+
+    @property
+    def value(self) -> float:
+        """Current float value read from props."""
+        return float(getattr(self.props, self.prop_name, self.min_val))
+
+    def _clamped(self, val: float) -> float:
+        """Clamp val to [min_val, max_val]."""
+        return max(self.min_val, min(self.max_val, val))
+
+    def _x_to_value(self, mx: float) -> float:
+        """Convert pixel x position to slider value."""
+        t = (mx - self.rect.x) / max(self.rect.w, 1.0)
+        return self.min_val + t * (self.max_val - self.min_val)
+
+    def on_mouse_press(self, mx: float, my: float) -> bool:
+        if self.hit_test(mx, my):
+            self._dragging = True
+            setattr(self.props, self.prop_name, self._clamped(self._x_to_value(mx)))
+            return True
+        return False
+
+    def on_mouse_move(self, mx: float, my: float) -> None:
+        super().on_mouse_move(mx, my)
+        if self._dragging:
+            setattr(self.props, self.prop_name, self._clamped(self._x_to_value(mx)))
+
+    def on_mouse_release(self, mx: float, my: float) -> bool:
+        if self._dragging:
+            self._dragging = False
             return True
         return False
