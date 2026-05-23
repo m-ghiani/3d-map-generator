@@ -8,6 +8,7 @@ and calls existing geomap.* operators for generation actions.
 from __future__ import annotations
 
 import traceback
+from typing import Callable
 
 import bpy
 from bpy.types import Operator
@@ -40,7 +41,7 @@ class GeoMapDashboardOperator(Operator):
         """Only available in VIEW_3D."""
         return context.area is not None and context.area.type == "VIEW_3D"
 
-    def invoke(self, context, event):
+    def invoke(self, context, event) -> set[str]:
         self._build_tree(context)
         self._open = True
         args = (self, context)
@@ -90,7 +91,7 @@ class GeoMapDashboardOperator(Operator):
         self._close_btn = self._tree["close_btn"]
         self._overlay_rect = self._tree["overlay_rect"]
 
-    def _make_close_cb(self, context):
+    def _make_close_cb(self, context) -> Callable[[], None]:
         """Return a closure that removes the draw handler and exits modal."""
         def _close():
             self._open = False
@@ -104,7 +105,7 @@ class GeoMapDashboardOperator(Operator):
     # Modal loop
     # ------------------------------------------------------------------
 
-    def modal(self, context, event):
+    def modal(self, context, event) -> set[str]:
         """Process mouse and keyboard events, dispatch to widget tree."""
         if not self._open:
             return {"FINISHED"}
