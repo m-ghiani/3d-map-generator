@@ -179,7 +179,7 @@ class SliderFloat(UIWidget):
         t = (self.value - self.min_val) / span
         fill_w = self.rect.w * max(0.0, min(1.0, t))
         draw_rect(self.rect.x, self.rect.y, fill_w, self.rect.h, (0.18, 0.48, 0.78, 0.90))
-        draw_text(f"{self.value:.3f}", self.rect.x + 4, self.rect.y + 6, 11, (1.0, 1.0, 1.0, 1.0))
+        draw_text(f"{self.value:g}", self.rect.x + 4, self.rect.y + 6, 11, (1.0, 1.0, 1.0, 1.0))
 
 
 class RadioGroup(UIWidget):
@@ -300,7 +300,7 @@ class LayerRow(UIWidget):
     _TOGGLE_W: int = 200
     _BTN_W: int = 90
     _SLIDER_W: int = 80
-    _RADIO_W: int = 100
+    _RADIO_W: int = 120
     _GAP: int = 8
 
     def __init__(

@@ -17,7 +17,6 @@ from .widgets import (
     SliderFloat,
     TabBar,
     TextLabel,
-    Toggle,
     UIWidget,
 )
 
@@ -143,15 +142,45 @@ def _build_layers_tab(
     row_w = float(w - _PAD * 2)
     py = float(y + h - _ROW_H - _PAD)
 
+    # Each tuple: (label, toggle_prop, cb_key, width_prop, wmin, wmax,
+    #              geometry_prop, geometry_options)
+    # Terrain is split into DEM + Imagery rows so map type and resolution
+    # are accessible from the primary workflow without opening the N-panel.
+    _dem_res_opts = [
+        ("DEM_LOW", "Lo"), ("DEM_MEDIUM", "Med"),
+        ("DEM_HIGH", "Hi"), ("DEM_ULTRA", "4K"),
+    ]
+    _style_opts = [
+        ("SATELLITE", "Sat"), ("STREETS", "Str"), ("TOPO", "Topo"),
+    ]
     layer_defs: list[tuple] = [
-        ("Terrain",     "import_relief",    "gen_TERRAIN",    None,            0.0, 0.0,  None,             None),
-        ("Coastlines",  "import_coast",     "gen_COASTLINES", "coast_width",   0.0, 0.14, None,             None),
-        ("Rivers",      "import_rivers",    "gen_RIVERS",     "river_width",   0.0, 0.22, "river_geometry", [("CURVE", "Curve"), ("MESH", "Mesh")]),
-        ("Roads",       "import_roads",     "gen_ROADS",      "road_width",    0.0, 0.18, "road_geometry",  [("CURVE", "Curve"), ("MESH", "Mesh")]),
-        ("Land Use",    "import_landuse",   "gen_LANDUSE",    None,            0.0, 0.0,  None,             None),
-        ("Buildings",   "import_buildings", "gen_BUILDINGS",  None,            0.0, 0.0,  None,             None),
-        ("Cities/POI",  "import_cities",    "gen_CITIES",     None,            0.0, 0.0,  None,             None),
-        ("Weather",     "import_weather",   "gen_WEATHER",    None,            0.0, 0.0,  None,             None),
+        ("DEM",
+         "import_relief", "gen_TERRAIN",
+         None, 0.0, 0.0,
+         "dem_resolution", _dem_res_opts),
+        ("Imagery",
+         "import_satellite", "gen_TERRAIN",
+         "satellite_resolution", 512.0, 4096.0,
+         "map_style", _style_opts),
+        ("Coastlines",
+         "import_coast", "gen_COASTLINES",
+         "coast_width", 0.0, 0.14, None, None),
+        ("Rivers",
+         "import_rivers", "gen_RIVERS",
+         "river_width", 0.0, 0.22,
+         "river_geometry", [("CURVE", "Curve"), ("MESH", "Mesh")]),
+        ("Roads",
+         "import_roads", "gen_ROADS",
+         "road_width", 0.0, 0.18,
+         "road_geometry", [("CURVE", "Curve"), ("MESH", "Mesh")]),
+        ("Land Use",  "import_landuse",   "gen_LANDUSE",
+         None, 0.0, 0.0, None, None),
+        ("Buildings", "import_buildings", "gen_BUILDINGS",
+         None, 0.0, 0.0, None, None),
+        ("Cities/POI", "import_cities",   "gen_CITIES",
+         None, 0.0, 0.0, None, None),
+        ("Weather",   "import_weather",   "gen_WEATHER",
+         None, 0.0, 0.0, None, None),
     ]
 
     for label, toggle_prop, cb_key, width_prop, wmin, wmax, geo_prop, geo_opts in layer_defs:

@@ -289,8 +289,9 @@ class LayerRowTests(unittest.TestCase):
 
     def test_geometry_radio_accessible_when_enabled(self):
         row, props, _ = self._make(enabled=True, with_width=False, with_geometry=True)
-        # radio at x=208, w=100 → right half (x=258) → MESH
-        row.on_mouse_press(258, 15)
+        # radio at x=208, w=120 → 2 options → each 60px
+        # CURVE: 208..268, MESH: 268..328 → click at 270 hits MESH
+        row.on_mouse_press(270, 15)
         self.assertEqual(props.river_geometry, "MESH")
 
     def test_geometry_radio_not_accessible_when_disabled(self):
@@ -302,11 +303,14 @@ class LayerRowTests(unittest.TestCase):
 class LayoutTests(unittest.TestCase):
     def _props(self):
         return SimpleNamespace(
-            import_relief=False, import_coast=True, import_rivers=False,
+            import_relief=False, import_satellite=False,
+            import_coast=True, import_rivers=False,
             import_roads=False, import_landuse=False, import_buildings=False,
             import_cities=False, import_weather=False, add_legend=False,
             coast_width=0.035, river_width=0.06, road_width=0.045,
             boundary_width=0.025, river_geometry="CURVE", road_geometry="CURVE",
+            dem_resolution="DEM_MEDIUM", map_style="SATELLITE",
+            satellite_resolution=2048,
             input_mode="COUNTRY",
         )
 
@@ -324,13 +328,15 @@ class LayoutTests(unittest.TestCase):
         tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
         self.assertEqual(len(tree["tabs"]), 4)
 
-    def test_layers_tab_has_eight_layer_rows(self):
+    def test_layers_tab_has_nine_layer_rows(self):
+        # DEM + Imagery + Coastlines + Rivers + Roads + Land Use +
+        # Buildings + Cities/POI + Weather = 9 rows
         from geomap_generator.dashboard.layout import build_widget_tree
         from geomap_generator.dashboard.widgets import LayerRow
         tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
         layers_tab = tree["tabs"][1]
         rows = [w for w in layers_tab if isinstance(w, LayerRow)]
-        self.assertEqual(len(rows), 8)
+        self.assertEqual(len(rows), 9)
 
     def test_progress_bar_reflects_tracker(self):
         from geomap_generator.dashboard.layout import build_widget_tree
