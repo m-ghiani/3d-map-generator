@@ -78,6 +78,18 @@ class Button(UIWidget):
                 return True
         return False
 
+    def draw(self, ctx: object) -> None:
+        """Render button with hover/pressed state feedback."""
+        from .renderer import draw_rect, draw_text
+        if self._pressed:
+            bg = (0.5, 0.5, 0.5, 0.95)
+        elif self.hovered:
+            bg = (0.38, 0.38, 0.38, 0.95)
+        else:
+            bg = (0.28, 0.28, 0.28, 0.90)
+        draw_rect(self.rect.x, self.rect.y, self.rect.w, self.rect.h, bg)
+        draw_text(self.label, self.rect.x + 6, self.rect.y + 8, 12, (1.0, 1.0, 1.0, 1.0))
+
 
 class Toggle(UIWidget):
     """Boolean toggle. Reads/writes a bool property on a props object."""
@@ -98,6 +110,18 @@ class Toggle(UIWidget):
             setattr(self.props, self.prop_name, not self.value)
             return True
         return False
+
+    def draw(self, ctx: object) -> None:
+        """Render checkbox square + label text."""
+        from .renderer import draw_rect, draw_text
+        check_sz = self.rect.h
+        color = (0.18, 0.65, 0.28, 0.90) if self.value else (0.22, 0.22, 0.22, 0.90)
+        draw_rect(self.rect.x, self.rect.y, check_sz, check_sz, color)
+        draw_text(
+            self.label,
+            self.rect.x + check_sz + 6, self.rect.y + 8,
+            12, (0.90, 0.90, 0.90, 1.0),
+        )
 
 
 class SliderFloat(UIWidget):
@@ -147,6 +171,16 @@ class SliderFloat(UIWidget):
             return True
         return False
 
+    def draw(self, ctx: object) -> None:
+        """Render track + filled portion + value text."""
+        from .renderer import draw_rect, draw_text
+        draw_rect(self.rect.x, self.rect.y, self.rect.w, self.rect.h, (0.14, 0.14, 0.14, 0.90))
+        span = max(self.max_val - self.min_val, 1e-6)
+        t = (self.value - self.min_val) / span
+        fill_w = self.rect.w * max(0.0, min(1.0, t))
+        draw_rect(self.rect.x, self.rect.y, fill_w, self.rect.h, (0.18, 0.48, 0.78, 0.90))
+        draw_text(f"{self.value:.3f}", self.rect.x + 4, self.rect.y + 6, 11, (1.0, 1.0, 1.0, 1.0))
+
 
 class RadioGroup(UIWidget):
     """Horizontal radio group bound to an enum property on a props object."""
@@ -181,6 +215,16 @@ class RadioGroup(UIWidget):
                 return True
         return False
 
+    def draw(self, ctx: object) -> None:
+        """Render each option as a colored segment."""
+        from .renderer import draw_rect, draw_text
+        for i, (val, label) in enumerate(self.options):
+            r = self._option_rect(i)
+            selected = val == self.value
+            bg = (0.18, 0.48, 0.78, 0.90) if selected else (0.20, 0.20, 0.20, 0.90)
+            draw_rect(r.x, r.y, r.w, r.h, bg)
+            draw_text(label, r.x + 4, r.y + 8, 11, (1.0, 1.0, 1.0, 1.0))
+
 
 class TabBar(UIWidget):
     """Tab bar that switches active_index on click."""
@@ -205,6 +249,15 @@ class TabBar(UIWidget):
                 return True
         return False
 
+    def draw(self, ctx: object) -> None:
+        """Render tab labels with active tab highlighted."""
+        from .renderer import draw_rect, draw_text
+        for i, name in enumerate(self.tabs):
+            r = self._tab_rect(i)
+            bg = (0.20, 0.20, 0.20, 0.96) if i == self.active_index else (0.11, 0.11, 0.11, 0.92)
+            draw_rect(r.x, r.y, r.w, r.h, bg)
+            draw_text(name, r.x + 10, r.y + 9, 13, (1.0, 1.0, 1.0, 1.0))
+
 
 class ProgressBar(UIWidget):
     """Progress bar displaying a 0..1 value and a status text string."""
@@ -214,6 +267,16 @@ class ProgressBar(UIWidget):
         self.progress: float = 0.0
         self.status: str = ""
 
+    def draw(self, ctx: object) -> None:
+        """Render progress track + fill + status text."""
+        from .renderer import draw_rect, draw_text
+        draw_rect(self.rect.x, self.rect.y, self.rect.w, self.rect.h, (0.11, 0.11, 0.11, 0.90))
+        fill_w = self.rect.w * max(0.0, min(1.0, self.progress))
+        draw_rect(self.rect.x, self.rect.y, fill_w, self.rect.h, (0.08, 0.55, 0.18, 0.90))
+        pct = int(self.progress * 100)
+        label = f"{self.status}  {pct}%" if self.status else f"{pct}%"
+        draw_text(label, self.rect.x + 8, self.rect.y + 7, 12, (1.0, 1.0, 1.0, 1.0))
+
 
 class TextLabel(UIWidget):
     """Non-interactive text label."""
@@ -221,6 +284,11 @@ class TextLabel(UIWidget):
     def __init__(self, rect: Rect, text: str) -> None:
         super().__init__(rect)
         self.text = text
+
+    def draw(self, ctx: object) -> None:
+        """Render static text."""
+        from .renderer import draw_text
+        draw_text(self.text, self.rect.x, self.rect.y + 8, 12, (0.85, 0.85, 0.85, 1.0))
 
 
 class LayerRow(UIWidget):
@@ -309,3 +377,11 @@ class LayerRow(UIWidget):
     def on_mouse_move(self, mx: float, my: float) -> None:
         for w in self._active_widgets():
             w.on_mouse_move(mx, my)
+
+    def draw(self, ctx: object) -> None:
+        """Render row background + all active sub-widgets."""
+        from .renderer import draw_rect
+        bg = (0.17, 0.17, 0.17, 0.85) if self._enabled else (0.12, 0.12, 0.12, 0.85)
+        draw_rect(self.rect.x, self.rect.y, self.rect.w, self.rect.h, bg)
+        for w in self._active_widgets():
+            w.draw(ctx)
