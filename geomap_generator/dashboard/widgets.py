@@ -9,19 +9,31 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+__all__ = ["Rect", "UIWidget"]
+
 
 @dataclass
 class Rect:
+    """Axis-aligned rectangle for widget hit testing and layout.
+
+    Stores position (x, y) and dimensions (w, h). All values are in pixels.
+    """
     x: float
     y: float
     w: float
     h: float
 
     def contains(self, mx: float, my: float) -> bool:
+        """Return True if point (mx, my) is within bounds (inclusive on all edges)."""
         return self.x <= mx <= self.x + self.w and self.y <= my <= self.y + self.h
 
 
 class UIWidget:
+    """Base class for all dashboard UI widgets.
+
+    Subclasses override draw() and mouse event handlers.
+    draw() must lazy-import renderer to avoid GPU context issues at import time.
+    """
     def __init__(self, rect: Rect) -> None:
         self.rect = rect
         self.hovered: bool = False
