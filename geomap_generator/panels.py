@@ -5,7 +5,28 @@ from .search_cache import load_presets
 
 
 # ---------------------------------------------------------------------------
-# Root panel — dashboard launcher only
+# T-panel (left toolbar) — dashboard launcher with globe icon
+# ---------------------------------------------------------------------------
+
+class GeoMapToolbarPanel(Panel):
+    bl_label = "GeoMap"
+    bl_idname = "VIEW3D_PT_geomap_toolbar"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "TOOLS"
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.use_property_split = False
+        box = layout.box()
+        col = box.column(align=True)
+        col.scale_y = 1.15
+        col.operator("geomap.open_dashboard", text="Dashboard", icon="WORLD")
+        col.separator(factor=0.35)
+        col.operator("geomap.update_addon", text="Reload", icon="FILE_REFRESH")
+
+
+# ---------------------------------------------------------------------------
+# Root N-panel — container for specialty sub-panels (post-generation tools)
 # ---------------------------------------------------------------------------
 
 class GeoMapPanel(Panel):
@@ -17,9 +38,13 @@ class GeoMapPanel(Panel):
 
     def draw(self, _context):
         layout = self.layout
-        row = layout.row()
-        row.scale_y = 2.2
-        row.operator("geomap.open_dashboard", text="Open Dashboard", icon="WINDOW")
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+        box = layout.box()
+        col = box.column(align=True)
+        col.scale_y = 1.12
+        col.operator("geomap.open_dashboard", text="Open Dashboard", icon="WORLD")
+        col.operator("geomap.update_addon", text="Update / Reload Addon", icon="FILE_REFRESH")
 
 
 # ---------------------------------------------------------------------------
@@ -38,14 +63,17 @@ class GeoMapAnnotationsPanel(Panel):
     def draw(self, context):
         props = context.scene.geomap_props
         layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
 
-        col = layout.column(align=True)
+        box = layout.box()
+        col = box.column(align=True)
         col.prop(props, "add_legend")
         col.prop(props, "add_scale_bar")
         col.prop(props, "add_north_arrow")
 
-        layout.separator()
-        layout.operator(
+        col.separator(factor=0.6)
+        col.operator(
             "geomap.update_layer",
             text="Generate Annotations",
             icon="FONT_DATA",
@@ -74,13 +102,18 @@ class GeoMapRoutePanel(Panel):
     def draw(self, context):
         props = context.scene.geomap_props
         layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
 
-        layout.row().prop(props, "route_mode", expand=True)
+        box = layout.box()
+        box.row().prop(props, "route_mode", expand=True)
         if props.route_mode == "ROUTE":
-            layout.prop(props, "route_profile")
+            box.prop(props, "route_profile")
 
-        layout.label(text="Routes")
-        row = layout.row()
+        layout.separator(factor=0.5)
+        list_box = layout.box()
+        list_box.label(text="Routes")
+        row = list_box.row()
         row.template_list(
             "UI_UL_list", "geomap_routes",
             props, "routes",
@@ -98,18 +131,21 @@ class GeoMapRoutePanel(Panel):
             box.prop(active, "mode", expand=True)
             if active.mode == "ROUTE":
                 box.prop(active, "profile")
+            box.separator(factor=0.4)
             box.label(text="Start")
             col = box.column(align=True)
             col.prop(active, "lat1")
             col.prop(active, "lon1")
             op = box.operator("geomap.pick_route_point", text="Pick Start on Map", icon="RESTRICT_SELECT_OFF")
             op.target = "START"
+            box.separator(factor=0.4)
             box.label(text="End")
             col = box.column(align=True)
             col.prop(active, "lat2")
             col.prop(active, "lon2")
             op = box.operator("geomap.pick_route_point", text="Pick End on Map", icon="RESTRICT_SELECT_OFF")
             op.target = "END"
+            box.separator(factor=0.4)
             box.prop(active, "color")
             box.prop(active, "label_start", icon="FONT_DATA")
             box.prop(active, "label_end", icon="FONT_DATA")
@@ -158,10 +194,13 @@ class GeoMapKmzPanel(Panel):
     def draw(self, context):
         props = context.scene.geomap_props
         layout = self.layout
-        layout.prop(props, "kmz_selection")
-        layout.operator("geomap.import_selected_kmz", text="Download and Integrate KMZ")
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        box = layout.box()
+        box.prop(props, "kmz_selection")
+        box.operator("geomap.import_selected_kmz", text="Download and Integrate KMZ")
         _package_path, user_path = catalog_paths()
-        layout.label(text=f"Catalog: {user_path}")
+        box.label(text=f"Catalog: {user_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -180,16 +219,20 @@ class GeoMapQualityPanel(Panel):
     def draw(self, context):
         props = context.scene.geomap_props
         layout = self.layout
-        layout.prop(props, "quality_preset")
-        layout.prop(props, "detail_level")
-        layout.prop(props, "auto_lod")
-        layout.separator()
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        box = layout.box()
+        box.prop(props, "quality_preset")
+        box.prop(props, "detail_level")
+        box.prop(props, "auto_lod")
+        layout.separator(factor=0.5)
         presets = load_presets()
         if presets:
-            layout.label(text="Saved Presets")
+            preset_box = layout.box()
+            preset_box.label(text="Saved Presets")
             for preset in presets:
                 name = preset.get("preset_name", "?")
-                row = layout.row(align=True)
+                row = preset_box.row(align=True)
                 op = row.operator("geomap.load_preset", text=name[:28], icon="PRESET")
                 op.preset_name = name
                 op2 = row.operator("geomap.delete_preset", text="", icon="TRASH")
@@ -217,11 +260,14 @@ class GeoMapLayerVisibilityPanel(Panel):
     def draw(self, _context):
         import bpy as _bpy
         layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
         root = _bpy.data.collections.get("GeoMap")
         if root is None:
             return
+        box = layout.box()
         for child in root.children:
-            row = layout.row(align=True)
+            row = box.row(align=True)
             row.label(text=child.name)
             row.prop(child, "hide_viewport", text="", emboss=False)
             row.prop(child, "hide_render", text="", emboss=False)
@@ -242,13 +288,16 @@ class GeoMapPresetsPanel(Panel):
 
     def draw(self, _context):
         layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
         presets = load_presets()
         if not presets:
             layout.label(text="No presets — save one in Quality & Presets panel")
             return
+        box = layout.box()
         for preset in presets:
             name = preset.get("preset_name", "?")
-            row = layout.row(align=True)
+            row = box.row(align=True)
             op = row.operator("geomap.load_preset", text=name[:28], icon="PRESET")
             op.preset_name = name
             op2 = row.operator("geomap.delete_preset", text="", icon="TRASH")

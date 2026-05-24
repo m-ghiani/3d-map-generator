@@ -104,10 +104,20 @@ class TerrainRenderer:
         obj["geomap_print_base_height"] = (
             base_height if settings.output_preset == "PRINT_3D" else 0.0
         )
+        self._add_dem_subdivision_modifier(obj)
         if not visible:
             obj.hide_viewport = True
             obj.hide_render = True
         return obj
+
+    @staticmethod
+    def _add_dem_subdivision_modifier(obj) -> None:
+        existing = obj.modifiers.get("GeoMap_DEM_Subdivision")
+        if existing is not None:
+            obj.modifiers.remove(existing)
+        mod = obj.modifiers.new("GeoMap_DEM_Subdivision", "SUBSURF")
+        mod.levels = 1
+        mod.render_levels = 1
 
     def create_map_box(
         self,

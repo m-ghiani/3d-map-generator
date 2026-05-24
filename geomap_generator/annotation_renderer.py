@@ -1,4 +1,5 @@
 import math
+import os
 import re
 
 import bpy
@@ -35,6 +36,21 @@ _PLACE_COLORS: dict[str, tuple[float, float, float, float]] = {
     "town": (0.10, 0.10, 0.18, 1.0),
     "village": (0.18, 0.18, 0.25, 1.0),
     "hamlet": (0.25, 0.25, 0.32, 1.0),
+}
+
+_FONT_CANDIDATES: dict[str, list[str]] = {
+    "SANS": [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+    ],
+    "SERIF": [
+        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+        "/Library/Fonts/Times New Roman.ttf",
+    ],
+    "MONO": [
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+    ],
 }
 
 
@@ -323,7 +339,11 @@ class PlaceLabelRenderer:
         z = z_terrain + scaled_map_value(float(settings.vector_z_offset) * 1.5, scene_scale)
 
         base_size = _PLACE_BASE_SIZE.get(place_type, 0.12)
-        size = max(scaled_map_value(base_size * size_factor, scene_scale), 1e-4)
+        type_factor = max(
+            float(getattr(settings, f"place_label_size_{place_type}", 1.0)),
+            0.01,
+        )
+        size = max(scaled_map_value(base_size * size_factor * type_factor, scene_scale), 1e-4)
 
         safe_name = self._sanitize(point.name)[:24]
         obj_name = f"GeoMap_Label_{place_type.title()}_{safe_name}"
@@ -339,8 +359,24 @@ class PlaceLabelRenderer:
         obj["geomap_lat"] = point.lat
         obj["geomap_lon"] = point.lon
         obj["geomap_label_text_size"] = size
+        obj["geomap_label_font_family"] = getattr(
+            settings, f"place_label_font_{place_type}", "DEFAULT",
+        )
         return obj
 
     @staticmethod
     def _sanitize(name: str) -> str:
         return re.sub(r"[^\w\s\-\.\,\'\(\)]", "", name).strip() or "?"
+
+
+def font_for_family(family: str):
+    family = (family or "DEFAULT").upper()
+    if family == "DEFAULT":
+        return None
+    for path in _FONT_CANDIDATES.get(family, []):
+        if os.path.exists(path):
+            try:
+                return bpy.data.fonts.load(path, check_existing=True)
+            except Exception:
+                return None
+    return None

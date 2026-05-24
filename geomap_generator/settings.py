@@ -92,10 +92,29 @@ class GenerationSettings:
     import_roads: bool
     import_admin: bool
     import_buildings: bool
+    building_provider: str
     import_cities: bool
     import_place_labels: bool
     place_label_min_type: str
     place_label_size_factor: float
+    place_label_size_capital: float
+    place_label_size_city: float
+    place_label_size_town: float
+    place_label_size_village: float
+    place_label_size_hamlet: float
+    place_label_size_historic: float
+    place_label_size_cultural: float
+    place_label_size_administrative: float
+    place_label_size_natural: float
+    place_label_font_capital: str
+    place_label_font_city: str
+    place_label_font_town: str
+    place_label_font_village: str
+    place_label_font_hamlet: str
+    place_label_font_historic: str
+    place_label_font_cultural: str
+    place_label_font_administrative: str
+    place_label_font_natural: str
     import_poi_historic: bool
     import_poi_cultural: bool
     import_poi_administrative: bool
@@ -114,6 +133,10 @@ class GenerationSettings:
     dem_slope_colors: bool = False
     add_north_arrow: bool = False
     import_weather: bool = False
+    weather_provider: str = "AUTO"
+    weather_forecast_day: int = 0
+    weather_granularity: str = "GRID"
+    weather_z_offset: float = 0.12
     weather_show_temperature: bool = True
     weather_show_wind: bool = True
     weather_grid_size: int = 3

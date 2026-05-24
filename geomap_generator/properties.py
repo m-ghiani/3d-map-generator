@@ -81,6 +81,20 @@ _WEATHER_PROVIDER_ITEMS = [
     ("WEATHERAPI", "WeatherAPI.com", "Requires API key"),
 ]
 
+_WEATHER_GRANULARITY_ITEMS = [
+    ("MAIN_CITY", "Main City", "Sample only the largest/main detected city"),
+    ("CITIES", "All Cities", "Sample detected cities, towns, villages and hamlets"),
+    ("LOCALITIES", "All Localities", "Sample all detected named places and POIs"),
+    ("GRID", "Grid", "Sample an NxN grid over the selected map area"),
+]
+
+_PLACE_LABEL_FONT_ITEMS = [
+    ("DEFAULT", "Default", "Use Blender's default font"),
+    ("SANS", "Sans", "Use a clean sans-serif system font if available"),
+    ("SERIF", "Serif", "Use a serif system font if available"),
+    ("MONO", "Mono", "Use a monospace system font if available"),
+]
+
 
 def _addon_preferences_id() -> str:
     package = __package__ or "geomap_generator"
@@ -555,6 +569,12 @@ class GeoMapProperties(bpy.types.PropertyGroup):
     import_roads: BoolProperty(name="Main Roads", default=False)
     import_admin: BoolProperty(name="Administrative Boundaries", default=False)
     import_buildings: BoolProperty(name="3D Buildings", default=False)
+    building_provider: EnumProperty(
+        name="Building Source",
+        items=_OVERPASS_PROVIDER_ITEMS,
+        default="AUTO",
+        description="Overpass source used to fetch OSM building footprints",
+    )
     import_cities: BoolProperty(name="Cities (markers)", default=False)
     import_place_labels: BoolProperty(
         name="Place Labels",
@@ -580,6 +600,24 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         step=10,
         description="Multiplier for place label font size",
     )
+    place_label_size_capital: FloatProperty(name="Capital Label Size", default=1.0, min=0.1, max=5.0, step=10)
+    place_label_size_city: FloatProperty(name="City Label Size", default=1.0, min=0.1, max=5.0, step=10)
+    place_label_size_town: FloatProperty(name="Town Label Size", default=1.0, min=0.1, max=5.0, step=10)
+    place_label_size_village: FloatProperty(name="Village Label Size", default=1.0, min=0.1, max=5.0, step=10)
+    place_label_size_hamlet: FloatProperty(name="Hamlet Label Size", default=1.0, min=0.1, max=5.0, step=10)
+    place_label_size_historic: FloatProperty(name="Historic POI Label Size", default=1.0, min=0.1, max=5.0, step=10)
+    place_label_size_cultural: FloatProperty(name="Cultural POI Label Size", default=1.0, min=0.1, max=5.0, step=10)
+    place_label_size_administrative: FloatProperty(name="Administrative POI Label Size", default=1.0, min=0.1, max=5.0, step=10)
+    place_label_size_natural: FloatProperty(name="Natural POI Label Size", default=1.0, min=0.1, max=5.0, step=10)
+    place_label_font_capital: EnumProperty(name="Capital Font", items=_PLACE_LABEL_FONT_ITEMS, default="DEFAULT")
+    place_label_font_city: EnumProperty(name="City Font", items=_PLACE_LABEL_FONT_ITEMS, default="DEFAULT")
+    place_label_font_town: EnumProperty(name="Town Font", items=_PLACE_LABEL_FONT_ITEMS, default="DEFAULT")
+    place_label_font_village: EnumProperty(name="Village Font", items=_PLACE_LABEL_FONT_ITEMS, default="DEFAULT")
+    place_label_font_hamlet: EnumProperty(name="Hamlet Font", items=_PLACE_LABEL_FONT_ITEMS, default="DEFAULT")
+    place_label_font_historic: EnumProperty(name="Historic POI Font", items=_PLACE_LABEL_FONT_ITEMS, default="DEFAULT")
+    place_label_font_cultural: EnumProperty(name="Cultural POI Font", items=_PLACE_LABEL_FONT_ITEMS, default="DEFAULT")
+    place_label_font_administrative: EnumProperty(name="Administrative POI Font", items=_PLACE_LABEL_FONT_ITEMS, default="DEFAULT")
+    place_label_font_natural: EnumProperty(name="Natural POI Font", items=_PLACE_LABEL_FONT_ITEMS, default="DEFAULT")
     import_poi_historic: BoolProperty(name="Historic POI", default=False)
     import_poi_cultural: BoolProperty(name="Cultural POI", default=False)
     import_poi_administrative: BoolProperty(name="Administrative POI", default=False)
@@ -700,7 +738,37 @@ class GeoMapProperties(bpy.types.PropertyGroup):
     import_weather: BoolProperty(
         name="Weather Layer",
         default=False,
-        description="Fetch current weather and place flat icons on the map",
+        description="Fetch weather forecast data and place flat icons on the map",
+    )
+    weather_provider: EnumProperty(
+        name="Weather Provider",
+        items=_WEATHER_PROVIDER_ITEMS,
+        default="AUTO",
+        description="Provider used for dashboard weather generation",
+    )
+    weather_forecast_day: IntProperty(
+        name="Forecast Day",
+        default=0,
+        min=0,
+        max=7,
+        description="Forecast offset in days: 0=today, 1=tomorrow",
+    )
+    weather_granularity: EnumProperty(
+        name="Forecast Granularity",
+        items=_WEATHER_GRANULARITY_ITEMS,
+        default="GRID",
+        description="How weather sampling points are selected",
+    )
+    weather_z_offset: FloatProperty(
+        name="Icon Height",
+        default=0.12,
+        min=0.0,
+        max=2.0,
+        soft_min=0.0,
+        soft_max=0.5,
+        step=1,
+        precision=3,
+        description="Vertical offset for weather mesh icons above the map in Blender units",
     )
     weather_show_temperature: BoolProperty(
         name="Temperature",

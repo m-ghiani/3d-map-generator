@@ -11,6 +11,26 @@ from typing import Callable, Optional
 
 __all__ = ["Rect", "UIWidget", "Button", "Toggle", "SliderFloat", "RadioGroup", "TabBar", "ProgressBar", "TextLabel", "LayerRow"]
 
+_PANEL_BG = (0.145, 0.145, 0.145, 0.94)
+_PANEL_BG_ALT = (0.18, 0.18, 0.18, 0.94)
+_CONTROL_BG = (0.23, 0.23, 0.23, 0.96)
+_CONTROL_HOVER = (0.30, 0.30, 0.30, 0.96)
+_CONTROL_PRESSED = (0.36, 0.36, 0.36, 0.96)
+_BORDER = (0.055, 0.055, 0.055, 1.0)
+_HILITE = (0.34, 0.55, 0.78, 0.98)
+_HILITE_DARK = (0.22, 0.39, 0.58, 0.98)
+_TEXT = (0.90, 0.90, 0.90, 1.0)
+_TEXT_MUTED = (0.68, 0.68, 0.68, 1.0)
+
+
+def _draw_box(rect: "Rect", color: tuple[float, float, float, float]) -> None:
+    from .renderer import draw_rect
+    draw_rect(rect.x, rect.y, rect.w, rect.h, color)
+    draw_rect(rect.x, rect.y, rect.w, 1.0, _BORDER)
+    draw_rect(rect.x, rect.y + rect.h - 1.0, rect.w, 1.0, (0.30, 0.30, 0.30, 0.72))
+    draw_rect(rect.x, rect.y, 1.0, rect.h, _BORDER)
+    draw_rect(rect.x + rect.w - 1.0, rect.y, 1.0, rect.h, _BORDER)
+
 
 @dataclass
 class Rect:
@@ -80,15 +100,15 @@ class Button(UIWidget):
 
     def draw(self, ctx: object) -> None:
         """Render button with hover/pressed state feedback."""
-        from .renderer import draw_rect, draw_text
+        from .renderer import draw_text
         if self._pressed:
-            bg = (0.5, 0.5, 0.5, 0.95)
+            bg = _CONTROL_PRESSED
         elif self.hovered:
-            bg = (0.38, 0.38, 0.38, 0.95)
+            bg = _CONTROL_HOVER
         else:
-            bg = (0.28, 0.28, 0.28, 0.90)
-        draw_rect(self.rect.x, self.rect.y, self.rect.w, self.rect.h, bg)
-        draw_text(self.label, self.rect.x + 6, self.rect.y + 8, 12, (1.0, 1.0, 1.0, 1.0))
+            bg = _CONTROL_BG
+        _draw_box(self.rect, bg)
+        draw_text(self.label, self.rect.x + 8, self.rect.y + 9, 12, _TEXT)
 
 
 class Toggle(UIWidget):
@@ -114,13 +134,16 @@ class Toggle(UIWidget):
     def draw(self, ctx: object) -> None:
         """Render checkbox square + label text."""
         from .renderer import draw_rect, draw_text
-        check_sz = self.rect.h
-        color = (0.18, 0.65, 0.28, 0.90) if self.value else (0.22, 0.22, 0.22, 0.90)
-        draw_rect(self.rect.x, self.rect.y, check_sz, check_sz, color)
+        check_sz = min(self.rect.h, 22.0)
+        check_y = self.rect.y + (self.rect.h - check_sz) * 0.5
+        box = Rect(self.rect.x + 6.0, check_y, check_sz, check_sz)
+        _draw_box(box, _HILITE_DARK if self.value else _CONTROL_BG)
+        if self.value:
+            draw_rect(box.x + 5.0, box.y + 5.0, box.w - 10.0, box.h - 10.0, _HILITE)
         draw_text(
             self.label,
-            self.rect.x + check_sz + 6, self.rect.y + 8,
-            12, (0.90, 0.90, 0.90, 1.0),
+            self.rect.x + check_sz + 14, self.rect.y + 9,
+            12, _TEXT,
         )
 
 
@@ -144,9 +167,13 @@ class SliderFloat(UIWidget):
         """Current float value read from props."""
         return float(getattr(self.props, self.prop_name, self.min_val))
 
-    def _clamped(self, val: float) -> float:
-        """Clamp val to [min_val, max_val]."""
-        return max(self.min_val, min(self.max_val, val))
+    def _clamped(self, val: float):
+        """Clamp val to [min_val, max_val], matching the bound prop type."""
+        clamped = max(self.min_val, min(self.max_val, val))
+        current = getattr(self.props, self.prop_name, self.min_val)
+        if isinstance(current, int) and not isinstance(current, bool):
+            return int(round(clamped))
+        return float(clamped)
 
     def _x_to_value(self, mx: float) -> float:
         """Convert pixel x position to slider value."""
@@ -174,12 +201,12 @@ class SliderFloat(UIWidget):
     def draw(self, ctx: object) -> None:
         """Render track + filled portion + value text."""
         from .renderer import draw_rect, draw_text
-        draw_rect(self.rect.x, self.rect.y, self.rect.w, self.rect.h, (0.14, 0.14, 0.14, 0.90))
+        _draw_box(self.rect, (0.12, 0.12, 0.12, 0.96))
         span = max(self.max_val - self.min_val, 1e-6)
         t = (self.value - self.min_val) / span
         fill_w = self.rect.w * max(0.0, min(1.0, t))
-        draw_rect(self.rect.x, self.rect.y, fill_w, self.rect.h, (0.18, 0.48, 0.78, 0.90))
-        draw_text(f"{self.value:g}", self.rect.x + 4, self.rect.y + 6, 11, (1.0, 1.0, 1.0, 1.0))
+        draw_rect(self.rect.x + 1, self.rect.y + 1, max(0.0, fill_w - 2), self.rect.h - 2, _HILITE_DARK)
+        draw_text(f"{self.value:g}", self.rect.x + 8, self.rect.y + 8, 11, _TEXT)
 
 
 class RadioGroup(UIWidget):
@@ -221,9 +248,11 @@ class RadioGroup(UIWidget):
         for i, (val, label) in enumerate(self.options):
             r = self._option_rect(i)
             selected = val == self.value
-            bg = (0.18, 0.48, 0.78, 0.90) if selected else (0.20, 0.20, 0.20, 0.90)
-            draw_rect(r.x, r.y, r.w, r.h, bg)
-            draw_text(label, r.x + 4, r.y + 8, 11, (1.0, 1.0, 1.0, 1.0))
+            bg = _HILITE_DARK if selected else _CONTROL_BG
+            _draw_box(r, bg)
+            if i > 0:
+                draw_rect(r.x, r.y + 2.0, 1.0, r.h - 4.0, _BORDER)
+            draw_text(label, r.x + 8, r.y + 9, 11, _TEXT if selected else _TEXT_MUTED)
 
 
 class TabBar(UIWidget):
@@ -254,9 +283,12 @@ class TabBar(UIWidget):
         from .renderer import draw_rect, draw_text
         for i, name in enumerate(self.tabs):
             r = self._tab_rect(i)
-            bg = (0.20, 0.20, 0.20, 0.96) if i == self.active_index else (0.11, 0.11, 0.11, 0.92)
+            bg = _PANEL_BG_ALT if i == self.active_index else (0.105, 0.105, 0.105, 0.96)
             draw_rect(r.x, r.y, r.w, r.h, bg)
-            draw_text(name, r.x + 10, r.y + 9, 13, (1.0, 1.0, 1.0, 1.0))
+            if i == self.active_index:
+                draw_rect(r.x, r.y, r.w, 2.0, _HILITE)
+            draw_rect(r.x + r.w - 1.0, r.y + 5.0, 1.0, r.h - 10.0, _BORDER)
+            draw_text(name, r.x + 10, r.y + 10, 12, _TEXT if i == self.active_index else _TEXT_MUTED)
 
 
 class ProgressBar(UIWidget):
@@ -270,12 +302,12 @@ class ProgressBar(UIWidget):
     def draw(self, ctx: object) -> None:
         """Render progress track + fill + status text."""
         from .renderer import draw_rect, draw_text
-        draw_rect(self.rect.x, self.rect.y, self.rect.w, self.rect.h, (0.11, 0.11, 0.11, 0.90))
+        _draw_box(self.rect, (0.10, 0.10, 0.10, 0.96))
         fill_w = self.rect.w * max(0.0, min(1.0, self.progress))
-        draw_rect(self.rect.x, self.rect.y, fill_w, self.rect.h, (0.08, 0.55, 0.18, 0.90))
+        draw_rect(self.rect.x + 1, self.rect.y + 1, max(0.0, fill_w - 2), self.rect.h - 2, (0.26, 0.56, 0.24, 0.96))
         pct = int(self.progress * 100)
         label = f"{self.status}  {pct}%" if self.status else f"{pct}%"
-        draw_text(label, self.rect.x + 8, self.rect.y + 7, 12, (1.0, 1.0, 1.0, 1.0))
+        draw_text(label, self.rect.x + 10, self.rect.y + 9, 12, _TEXT)
 
 
 class TextLabel(UIWidget):
@@ -288,7 +320,7 @@ class TextLabel(UIWidget):
     def draw(self, ctx: object) -> None:
         """Render static text."""
         from .renderer import draw_text
-        draw_text(self.text, self.rect.x, self.rect.y + 8, 12, (0.85, 0.85, 0.85, 1.0))
+        draw_text(self.text, self.rect.x, self.rect.y + 9, 12, _TEXT_MUTED)
 
 
 class LayerRow(UIWidget):
@@ -297,11 +329,11 @@ class LayerRow(UIWidget):
     Inline settings (slider, radio) are visible only when toggle is ON (_enabled).
     """
 
-    _TOGGLE_W: int = 200
-    _BTN_W: int = 90
-    _SLIDER_W: int = 80
-    _RADIO_W: int = 120
-    _GAP: int = 8
+    _TOGGLE_W: int = 190
+    _BTN_W: int = 96
+    _SLIDER_W: int = 118
+    _RADIO_W: int = 154
+    _GAP: int = 10
 
     def __init__(
         self,
@@ -380,8 +412,7 @@ class LayerRow(UIWidget):
 
     def draw(self, ctx: object) -> None:
         """Render row background + all active sub-widgets."""
-        from .renderer import draw_rect
-        bg = (0.17, 0.17, 0.17, 0.85) if self._enabled else (0.12, 0.12, 0.12, 0.85)
-        draw_rect(self.rect.x, self.rect.y, self.rect.w, self.rect.h, bg)
+        bg = _PANEL_BG_ALT if self._enabled else _PANEL_BG
+        _draw_box(self.rect, bg)
         for w in self._active_widgets():
             w.draw(ctx)

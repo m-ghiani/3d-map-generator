@@ -1,6 +1,10 @@
 import threading
 import time
+import importlib
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 
 from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
@@ -66,6 +70,33 @@ from .terrain_renderer import TerrainRenderer
 from .threading_utils import assert_main_thread
 from .validation import validate_settings
 from .vector_renderer import VectorRenderer
+
+
+def _addon_package_name() -> str:
+    return (__package__ or "geomap_generator").split(".", 1)[0]
+
+
+def _addon_root_path() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _hot_reload_addon(addon_package: str):
+    """Timer callback: unregister, reload modules from disk, and register again."""
+    module = sys.modules.get(addon_package)
+    if module is None:
+        return None
+
+    try:
+        if hasattr(module, "unregister"):
+            module.unregister()
+        module = importlib.reload(module)
+        if hasattr(module, "register"):
+            module.register()
+        print(f"GeoMap Generator: hot reload completed for {addon_package}")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return None
 
 
 class GeoMapGenerateOperator(Operator):
@@ -439,7 +470,7 @@ class GeoMapGenerateOperator(Operator):
             requests.append(
                 {
                     "label": "3D buildings",
-                    "provider": self._provider("road_provider"),
+                    "provider": getattr(props, "building_provider", "AUTO"),
                     "coastlines": False,
                     "rivers": False,
                     "roads": False,
@@ -1240,20 +1271,27 @@ class GeoMapGenerateOperator(Operator):
             if props.import_weather:
                 self._raise_if_cancelled(tracker)
                 tracker.set_status("Fetching weather data...", 0.997)
+                tracker.set_weather_status("Weather: fetching forecast data...", 0.10)
                 phase_at = time.time()
                 try:
                     from .weather import WeatherClient
                     from .weather_renderer import WeatherRenderer
-                    weather_pts = WeatherClient().fetch_grid(
+                    weather_pts = WeatherClient().fetch_for_granularity(
                         osm_data.bbox,
+                        osm_data.points,
+                        getattr(props, "weather_granularity", "GRID"),
                         grid_size=getattr(props, "weather_grid_size", 3),
-                        provider=self._prefs.weather_provider,
+                        provider=getattr(props, "weather_provider", self._prefs.weather_provider),
                         openweathermap_token=self._prefs.openweathermap_token,
                         weatherapi_token=self._prefs.weatherapi_token,
+                        forecast_day=getattr(props, "weather_forecast_day", 0),
                     )
+                    tracker.set_weather_status("Weather: building mesh symbols...", 0.70)
                     WeatherRenderer().render(context, weather_pts, osm_data.bbox, props, scene_scale)
+                    tracker.set_weather_status("Weather ready", 1.0)
                     tracker.log(f"Weather icons placed: {len(weather_pts)} in {time.time() - phase_at:.2f}s")
                 except Exception as exc:
+                    tracker.set_weather_status("Weather failed", 1.0)
                     tracker.log(f"⚠ Weather layer failed ({exc}), skipping")
                 yield
 
@@ -1609,30 +1647,60 @@ class GeoMapStoreBasemapTokenOperator(Operator):
 
 class GeoMapCreatePlaceLabelOperator(Operator):
     bl_idname = "geomap.create_place_label"
-    bl_label = "Create Text from Selected Markers"
-    bl_description = "Create 3D text objects from selected place label EMPTY markers"
+    bl_label = "Create Label from Selected POI"
+    bl_description = "Create 3D text objects from selected GeoMap POI or label markers"
+
+    @staticmethod
+    def _is_label_source(obj) -> bool:
+        if obj is None:
+            return False
+        layer = obj.get("geomap_layer", "")
+        return layer == "place_label" or layer.startswith("poi_")
+
+    @classmethod
+    def _label_sources(cls, context) -> list:
+        objects = []
+        seen: set[str] = set()
+        for obj in list(getattr(context, "selected_objects", ()) or ()):
+            if cls._is_label_source(obj) and obj.name not in seen:
+                objects.append(obj)
+                seen.add(obj.name)
+        active = getattr(context, "active_object", None)
+        if cls._is_label_source(active) and active.name not in seen:
+            objects.append(active)
+        return objects
 
     @classmethod
     def poll(cls, context):
-        return any(
-            obj.get("geomap_layer") == "place_label"
-            for obj in context.selected_objects
-        )
+        return bool(cls._label_sources(context))
 
     def execute(self, context):
         import math
         import bpy as _bpy
 
-        from .annotation_renderer import _PLACE_COLORS
+        from .annotation_renderer import _PLACE_COLORS, font_for_family
         from .blender_scene import link_to_geomap_collection, material_named
 
         created = 0
-        for obj in list(context.selected_objects):
-            if obj.get("geomap_layer") != "place_label":
-                continue
+        for obj in self._label_sources(context):
             name = obj.get("geomap_name", "?")
-            place_type = obj.get("geomap_place_type", "hamlet")
-            size = float(obj.get("geomap_label_text_size", 0.12))
+            place_type = obj.get(
+                "geomap_place_type",
+                obj.get("geomap_category", "hamlet"),
+            )
+            size = float(obj.get(
+                "geomap_label_text_size",
+                getattr(obj, "empty_display_size", 0.12),
+            ))
+            if not obj.get("geomap_label_text_size"):
+                size *= max(
+                    float(getattr(
+                        context.scene.geomap_props,
+                        f"place_label_size_{place_type}",
+                        1.0,
+                    )),
+                    0.01,
+                )
 
             color = _PLACE_COLORS.get(place_type, _PLACE_COLORS["hamlet"])
             material = material_named(f"GeoMap_Label_{place_type}_Material", color)
@@ -1642,6 +1710,16 @@ class GeoMapCreatePlaceLabelOperator(Operator):
             curve.size = size
             curve.align_x = "CENTER"
             curve.align_y = "BOTTOM"
+            family = obj.get("geomap_label_font_family")
+            if not family:
+                family = getattr(
+                    context.scene.geomap_props,
+                    f"place_label_font_{place_type}",
+                    "DEFAULT",
+                )
+            font = font_for_family(family)
+            if font is not None:
+                curve.font = font
             text_obj = _bpy.data.objects.new(f"{obj.name}_Text", curve)
             text_obj.location = obj.location.copy()
             text_obj.rotation_euler = (math.pi / 2, 0, 0)
@@ -1761,6 +1839,8 @@ class GeoMapUpdateLayerOperator(Operator):
             elif self.layer_kind == "WEATHER":
                 self._update_weather(context, bbox, settings, prefs, scene_scale, tracker)
         except Exception as error:
+            if self.layer_kind == "WEATHER":
+                tracker.set_weather_status("Weather failed", 1.0)
             tracker.log(f"✗ Layer update failed: {error}")
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
@@ -1779,6 +1859,14 @@ class GeoMapUpdateLayerOperator(Operator):
                 "No bounding box found. Set coordinates or generate a map first."
             )
         return bbox
+
+    @staticmethod
+    def _vector_fetch_context(prefs: ProviderSettings):
+        return SimpleNamespace(
+            _prefs=prefs,
+            _client=OsmApiClient(),
+            _provider=lambda name: getattr(prefs, name, "AUTO") if prefs else "AUTO",
+        )
 
     def _update_terrain(
         self,
@@ -1866,7 +1954,7 @@ class GeoMapUpdateLayerOperator(Operator):
             if removed:
                 tracker.log(f"Removed {removed} objects from {collection_name}")
 
-        op = SimpleNamespace(_prefs=prefs, _client=OsmApiClient())
+        op = self._vector_fetch_context(prefs)
         data = GeoMapGenerateOperator._fetch_vector_data(op, bbox, settings, tracker)
         building_ways, _landuse_ways2, vector_ways = GeoMapGenerateOperator._split_building_ways(data, settings)
         vector_layers = GeoMapGenerateOperator._split_vector_layers(
@@ -1932,7 +2020,7 @@ class GeoMapUpdateLayerOperator(Operator):
         tracker.log("Updating buildings layer only")
         clear_geomap_child_collection("3D Models")
 
-        op = SimpleNamespace(_prefs=prefs, _client=OsmApiClient())
+        op = self._vector_fetch_context(prefs)
         data = GeoMapGenerateOperator._fetch_vector_data(op, bbox, settings, tracker)
         building_ways, _lw, _vw = GeoMapGenerateOperator._split_building_ways(data, settings)
         if not building_ways:
@@ -1995,7 +2083,7 @@ class GeoMapUpdateLayerOperator(Operator):
         on = _FEATURE_FLAGS.get(feature, {})
         single_settings = dataclasses.replace(settings, **{**off, **on})
 
-        op = SimpleNamespace(_prefs=prefs, _client=OsmApiClient())
+        op = self._vector_fetch_context(prefs)
         data = GeoMapGenerateOperator._fetch_vector_data(op, bbox, single_settings, tracker)
 
         dem_sampler = None
@@ -2042,18 +2130,65 @@ class GeoMapUpdateLayerOperator(Operator):
         from .weather import WeatherClient
         from .weather_renderer import WeatherRenderer
         tracker.log("Fetching weather data...")
+        tracker.set_weather_status("Weather: fetching forecast data...", 0.10)
         clear_geomap_child_collection("Weather")
         grid_size = getattr(settings, "weather_grid_size", 3)
-        points = WeatherClient().fetch_grid(
-            bbox,
-            grid_size=grid_size,
-            provider=prefs.weather_provider,
-            openweathermap_token=prefs.openweathermap_token,
-            weatherapi_token=prefs.weatherapi_token,
-        )
+        provider = getattr(settings, "weather_provider", prefs.weather_provider)
+        forecast_day = getattr(settings, "weather_forecast_day", 0)
+        granularity = getattr(settings, "weather_granularity", "GRID")
+        samples = self._weather_samples_from_scene(granularity)
+        client = WeatherClient()
+        if samples:
+            points = client.fetch_samples(
+                samples,
+                provider=provider,
+                openweathermap_token=prefs.openweathermap_token,
+                weatherapi_token=prefs.weatherapi_token,
+                forecast_day=forecast_day,
+            )
+        else:
+            points = client.fetch_grid(
+                bbox,
+                grid_size=grid_size,
+                provider=provider,
+                openweathermap_token=prefs.openweathermap_token,
+                weatherapi_token=prefs.weatherapi_token,
+                forecast_day=forecast_day,
+            )
+        tracker.set_weather_status("Weather: building mesh symbols...", 0.70)
         tracker.log(f"✓ Weather: {len(points)} sample points")
         WeatherRenderer().render(context, points, bbox, settings, scene_scale)
+        tracker.set_weather_status("Weather ready", 1.0)
         tracker.log("Weather layer ready")
+
+    @staticmethod
+    def _weather_samples_from_scene(granularity: str) -> list[tuple[float, float]]:
+        if granularity == "GRID":
+            return []
+        import bpy as _bpy
+
+        samples = []
+        seen = set()
+        for obj in _bpy.data.objects:
+            layer = obj.get("geomap_layer", "")
+            is_city = layer == "place_label" or obj.get("geomap_category") == "city"
+            is_locality = is_city or layer.startswith("poi_")
+            if granularity in {"MAIN_CITY", "CITIES"} and not is_city:
+                continue
+            if granularity == "LOCALITIES" and not is_locality:
+                continue
+            lat = obj.get("geomap_lat")
+            lon = obj.get("geomap_lon")
+            if lat is None or lon is None:
+                continue
+            key = (round(float(lat), 5), round(float(lon), 5))
+            if key in seen:
+                continue
+            seen.add(key)
+            samples.append((float(lat), float(lon)))
+            if granularity == "MAIN_CITY":
+                break
+        return samples
 
 
 class GeoMapImportSelectedKmzOperator(Operator):
@@ -2742,4 +2877,70 @@ class GeoMapDeletePresetOperator(Operator):
     def execute(self, context):
         delete_preset(self.preset_name)
         self.report({"INFO"}, f"Preset '{self.preset_name}' deleted")
+        return {"FINISHED"}
+
+
+class GeoMapUpdateAddonOperator(Operator):
+    bl_idname = "geomap.update_addon"
+    bl_label = "Update / Reload GeoMap Addon"
+    bl_description = "Reload the GeoMap addon in Blender, optionally pulling latest git changes first"
+
+    pull_from_git: BoolProperty(
+        name="Pull latest from git first",
+        default=False,
+        description="Run git pull --ff-only in the addon folder before reloading",
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.prop(self, "pull_from_git")
+        layout.label(text=f"Addon folder: {_addon_root_path()}")
+
+    def execute(self, context):
+        tracker = ProgressTracker.get_instance()
+        if tracker.is_running:
+            self.report({"WARNING"}, "Cancel or finish generation before updating the addon")
+            return {"CANCELLED"}
+        try:
+            from .dashboard.modal import GeoMapDashboardOperator
+            if GeoMapDashboardOperator._draw_handle is not None:
+                self.report({"WARNING"}, "Close the GeoMap dashboard before updating the addon")
+                return {"CANCELLED"}
+        except Exception:
+            pass
+
+        addon_root = _addon_root_path()
+        if self.pull_from_git:
+            git_dir = addon_root / ".git"
+            if not git_dir.exists():
+                self.report({"ERROR"}, f"Addon folder is not a git checkout: {addon_root}")
+                return {"CANCELLED"}
+            try:
+                result = subprocess.run(
+                    ["git", "-C", str(addon_root), "pull", "--ff-only"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except Exception as exc:
+                self.report({"ERROR"}, f"Git update failed: {exc}")
+                return {"CANCELLED"}
+            if result.returncode != 0:
+                msg = (result.stderr or result.stdout or "git pull failed").strip()
+                self.report({"ERROR"}, msg[:240])
+                return {"CANCELLED"}
+
+        import bpy as _bpy
+
+        addon_package = _addon_package_name()
+        _bpy.app.timers.register(
+            lambda: _hot_reload_addon(addon_package),
+            first_interval=0.1,
+        )
+        action = "Update scheduled" if self.pull_from_git else "Reload scheduled"
+        self.report({"INFO"}, f"{action}. GeoMap will refresh in this Blender session.")
         return {"FINISHED"}

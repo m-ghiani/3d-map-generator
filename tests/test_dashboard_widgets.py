@@ -179,6 +179,20 @@ class SliderFloatTests(unittest.TestCase):
         s.on_mouse_move(50, 10)
         self.assertAlmostEqual(props.width, 0.0, places=2)
 
+    def test_int_property_gets_int_value(self):
+        from geomap_generator.dashboard.widgets import Rect, SliderFloat
+        props = SimpleNamespace(satellite_resolution=2048)
+        s = SliderFloat(
+            Rect(0, 0, 100, 20),
+            "Resolution",
+            props,
+            "satellite_resolution",
+            512,
+            4096,
+        )
+        s.on_mouse_press(50, 10)
+        self.assertIs(type(props.satellite_resolution), int)
+
 
 class RadioGroupTests(unittest.TestCase):
     def _make(self):
@@ -263,13 +277,13 @@ class LayerRowTests(unittest.TestCase):
 
     def test_toggle_click_enables(self):
         row, props, _ = self._make(enabled=False)
-        # toggle occupies x=0..200 (LayerRow._TOGGLE_W = 200)
+        # toggle occupies the left side of the row.
         row.on_mouse_press(10, 15)
         self.assertTrue(props.import_rivers)
 
     def test_generate_btn_fires_when_clicked(self):
         row, props, called = self._make(enabled=True)
-        # btn at x = 600 - 90 = 510..600 (LayerRow._BTN_W = 90)
+        # generate button sits at the right edge of the row.
         row.on_mouse_press(550, 15)
         row.on_mouse_release(550, 15)
         self.assertEqual(called, ["gen"])
@@ -283,20 +297,19 @@ class LayerRowTests(unittest.TestCase):
 
     def test_slider_accessible_when_layer_enabled(self):
         row, props, _ = self._make(enabled=True, with_width=True)
-        # slider x=208, w=80 → left edge → value = 0.0
-        row.on_mouse_press(208, 15)
+        # slider left edge maps to min value.
+        row.on_mouse_press(row._slider.rect.x, 15)
         self.assertAlmostEqual(props.river_width, 0.0, places=2)
 
     def test_geometry_radio_accessible_when_enabled(self):
         row, props, _ = self._make(enabled=True, with_width=False, with_geometry=True)
-        # radio at x=208, w=120 → 2 options → each 60px
-        # CURVE: 208..268, MESH: 268..328 → click at 270 hits MESH
-        row.on_mouse_press(270, 15)
+        # second radio segment selects mesh.
+        row.on_mouse_press(row._radio.rect.x + row._radio.rect.w * 0.75, 15)
         self.assertEqual(props.river_geometry, "MESH")
 
     def test_geometry_radio_not_accessible_when_disabled(self):
         row, props, _ = self._make(enabled=False, with_geometry=True)
-        row.on_mouse_press(258, 15)
+        row.on_mouse_press(row._radio.rect.x + row._radio.rect.w * 0.75, 15)
         self.assertEqual(props.river_geometry, "CURVE")
 
 
@@ -306,12 +319,34 @@ class LayoutTests(unittest.TestCase):
             import_relief=False, import_satellite=False,
             import_coast=True, import_rivers=False,
             import_roads=False, import_landuse=False, import_buildings=False,
-            import_cities=False, import_weather=False, add_legend=False,
+            import_cities=False, add_legend=False,
+            building_quality="AUTO", building_provider="AUTO",
+            drape_vectors_on_dem=True,
+            vector_z_offset=0.03, dem_height_scale=0.001,
+            height_exaggeration=1.0,
             coast_width=0.035, river_width=0.06, road_width=0.045,
             boundary_width=0.025, river_geometry="CURVE", road_geometry="CURVE",
             dem_resolution="DEM_MEDIUM", map_style="SATELLITE",
             satellite_resolution=2048,
             input_mode="COUNTRY",
+            route_mode="ROUTE", route_profile="driving",
+            routes=[], route_active_index=0,
+            import_weather=False, weather_provider="AUTO",
+            weather_forecast_day=0, weather_granularity="GRID",
+            weather_show_temperature=True, weather_show_wind=True,
+            weather_grid_size=3, weather_z_offset=0.12,
+            import_place_labels=False, place_label_min_type="town",
+            place_label_size_factor=1.0,
+            place_label_size_capital=1.0, place_label_size_city=1.0,
+            place_label_size_town=1.0, place_label_size_village=1.0,
+            place_label_size_hamlet=1.0,
+            place_label_size_historic=1.0, place_label_size_cultural=1.0,
+            place_label_size_administrative=1.0, place_label_size_natural=1.0,
+            place_label_font_capital="DEFAULT", place_label_font_city="DEFAULT",
+            place_label_font_town="DEFAULT", place_label_font_village="DEFAULT",
+            place_label_font_hamlet="DEFAULT",
+            place_label_font_historic="DEFAULT", place_label_font_cultural="DEFAULT",
+            place_label_font_administrative="DEFAULT", place_label_font_natural="DEFAULT",
         )
 
     def _tracker(self):
@@ -320,23 +355,36 @@ class LayoutTests(unittest.TestCase):
     def test_returns_required_keys(self):
         from geomap_generator.dashboard.layout import build_widget_tree
         tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
-        for key in ("tab_bar", "close_btn", "tabs", "gen_btn", "progress_bar", "overlay_rect"):
+        for key in (
+            "tab_bar", "close_btn", "tabs", "gen_btn", "progress_bar",
+            "weather_progress_bar", "overlay_rect",
+        ):
             self.assertIn(key, tree)
 
-    def test_has_four_tabs(self):
+    def test_has_nine_tabs(self):
         from geomap_generator.dashboard.layout import build_widget_tree
         tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
-        self.assertEqual(len(tree["tabs"]), 4)
+        self.assertEqual(len(tree["tabs"]), 9)
 
-    def test_layers_tab_has_nine_layer_rows(self):
+    def test_layers_tab_has_seven_layer_rows(self):
         # DEM + Imagery + Coastlines + Rivers + Roads + Land Use +
-        # Buildings + Cities/POI + Weather = 9 rows
+        # Cities/POI = 7 rows
         from geomap_generator.dashboard.layout import build_widget_tree
         from geomap_generator.dashboard.widgets import LayerRow
         tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
         layers_tab = tree["tabs"][1]
         rows = [w for w in layers_tab if isinstance(w, LayerRow)]
-        self.assertEqual(len(rows), 9)
+        self.assertEqual(len(rows), 7)
+
+    def test_dem_layer_shows_height_scale_when_enabled(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        from geomap_generator.dashboard.widgets import SliderFloat
+        props = self._props()
+        props.import_relief = True
+        tree = build_widget_tree(props, self._tracker(), 1920, 1080, {})
+        layers_tab = tree["tabs"][1]
+        slider_props = [w.prop_name for w in layers_tab if isinstance(w, SliderFloat)]
+        self.assertIn("dem_height_scale", slider_props)
 
     def test_progress_bar_reflects_tracker(self):
         from geomap_generator.dashboard.layout import build_widget_tree
@@ -344,6 +392,71 @@ class LayoutTests(unittest.TestCase):
         tree = build_widget_tree(self._props(), tracker, 1920, 1080, {})
         self.assertAlmostEqual(tree["progress_bar"].progress, 0.42)
         self.assertEqual(tree["progress_bar"].status, "Fetching DEM")
+
+    def test_routes_tab_has_route_actions(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        from geomap_generator.dashboard.widgets import Button
+        tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
+        routes_tab = tree["tabs"][5]
+        labels = [w.label for w in routes_tab if isinstance(w, Button)]
+        for label in ("Add Route", "Pick Start", "Pick End", "Import Route"):
+            self.assertIn(label, labels)
+
+    def test_buildings_tab_has_generation_and_quality_controls(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        from geomap_generator.dashboard.widgets import Button, RadioGroup, SliderFloat
+        tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
+        buildings_tab = tree["tabs"][4]
+        button_labels = [w.label for w in buildings_tab if isinstance(w, Button)]
+        radio_props = [w.prop_name for w in buildings_tab if isinstance(w, RadioGroup)]
+        slider_props = [w.prop_name for w in buildings_tab if isinstance(w, SliderFloat)]
+        self.assertIn("Generate Buildings", button_labels)
+        self.assertIn("building_quality", radio_props)
+        self.assertIn("building_provider", radio_props)
+        self.assertEqual(slider_props, [])
+
+    def test_labels_tab_has_per_type_controls(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        from geomap_generator.dashboard.widgets import RadioGroup, SliderFloat
+        tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
+        labels_tab = tree["tabs"][3]
+        slider_props = [w.prop_name for w in labels_tab if isinstance(w, SliderFloat)]
+        radio_props = [w.prop_name for w in labels_tab if isinstance(w, RadioGroup)]
+        self.assertIn("place_label_size_city", slider_props)
+        self.assertIn("place_label_font_city", radio_props)
+        self.assertIn("place_label_size_historic", slider_props)
+        self.assertIn("place_label_font_historic", radio_props)
+
+    def test_weather_tab_hides_preferences_when_disabled(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        from geomap_generator.dashboard.widgets import RadioGroup, Toggle
+        tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
+        weather_tab = tree["tabs"][2]
+        self.assertEqual(len([w for w in weather_tab if isinstance(w, Toggle)]), 1)
+        self.assertFalse(any(isinstance(w, RadioGroup) for w in weather_tab))
+
+    def test_weather_tab_has_forecast_controls_when_enabled(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        from geomap_generator.dashboard.widgets import Button, ProgressBar, RadioGroup, SliderFloat
+        props = self._props()
+        props.import_weather = True
+        tree = build_widget_tree(props, self._tracker(), 1920, 1080, {})
+        weather_tab = tree["tabs"][2]
+        labels = [w.label for w in weather_tab if isinstance(w, Button)]
+        self.assertIn("Generate Weather", labels)
+        radio_props = [w.prop_name for w in weather_tab if isinstance(w, RadioGroup)]
+        self.assertIn("weather_provider", radio_props)
+        self.assertIn("weather_granularity", radio_props)
+        slider_props = [w.prop_name for w in weather_tab if isinstance(w, SliderFloat)]
+        self.assertIn("weather_z_offset", slider_props)
+        self.assertTrue(any(isinstance(w, ProgressBar) for w in weather_tab))
+
+    def test_generate_tab_contains_gen_button_and_progress(self):
+        from geomap_generator.dashboard.layout import build_widget_tree
+        tree = build_widget_tree(self._props(), self._tracker(), 1920, 1080, {})
+        generate_tab = tree["tabs"][8]
+        self.assertIs(tree["gen_btn"], generate_tab[0])
+        self.assertIs(tree["progress_bar"], generate_tab[1])
 
     def test_overlay_centered(self):
         from geomap_generator.dashboard.layout import build_widget_tree

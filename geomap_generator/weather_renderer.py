@@ -3,7 +3,7 @@ import math
 from .blender_scene import link_to_geomap_collection, material_named
 from .mesh_builder import BboxProjector
 from .models import BoundingBox
-from .scene_units import SceneScale
+from .scene_units import SceneScale, scaled_map_value
 from .threading_utils import assert_main_thread
 from .weather import WeatherPoint
 
@@ -37,6 +37,154 @@ def _octagon(cx: float, cy: float, cz: float, r: float) -> list[tuple]:
          cz)
         for i in range(8)
     ]
+
+
+def _poly(cx: float, cy: float, cz: float, r: float, count: int) -> list[tuple]:
+    return [
+        (cx + r * math.cos(math.pi * 2 * i / count),
+         cy + r * math.sin(math.pi * 2 * i / count),
+         cz)
+        for i in range(count)
+    ]
+
+
+def _append_face(
+    verts: list[tuple], faces: list[tuple], face_verts: list[tuple],
+) -> None:
+    start = len(verts)
+    verts.extend(face_verts)
+    faces.append(tuple(range(start, start + len(face_verts))))
+
+
+def _rect(cx: float, cy: float, cz: float, w: float, h: float) -> list[tuple]:
+    hw = w / 2
+    hh = h / 2
+    return [
+        (cx - hw, cy - hh, cz),
+        (cx + hw, cy - hh, cz),
+        (cx + hw, cy + hh, cz),
+        (cx - hw, cy + hh, cz),
+    ]
+
+
+class WeatherSymbolLibrary:
+    """Mesh symbol library for weather conditions on the map plane."""
+
+    @staticmethod
+    def build(condition: str, x: float, y: float, z: float, size: float):
+        c = (condition or "").lower()
+        if "storm" in c or "thunder" in c:
+            return WeatherSymbolLibrary._storm(x, y, z, size)
+        if "snow" in c:
+            return WeatherSymbolLibrary._snow(x, y, z, size)
+        if "rain" in c or "shower" in c or "drizzle" in c:
+            return WeatherSymbolLibrary._rain(x, y, z, size)
+        if "cloud" in c or "fog" in c or "mist" in c:
+            return WeatherSymbolLibrary._cloud(x, y, z, size)
+        return WeatherSymbolLibrary._sun(x, y, z, size)
+
+    @staticmethod
+    def material_name(condition: str) -> str:
+        c = (condition or "").lower()
+        if "storm" in c or "thunder" in c:
+            return "GeoMap_WeatherSymbol_Storm"
+        if "snow" in c:
+            return "GeoMap_WeatherSymbol_Snow"
+        if "rain" in c or "shower" in c or "drizzle" in c:
+            return "GeoMap_WeatherSymbol_Rain"
+        if "cloud" in c or "fog" in c or "mist" in c:
+            return "GeoMap_WeatherSymbol_Cloud"
+        return "GeoMap_WeatherSymbol_Clear"
+
+    @staticmethod
+    def color(condition: str) -> tuple:
+        c = (condition or "").lower()
+        if "storm" in c or "thunder" in c:
+            return (0.95, 0.80, 0.18, 1.0)
+        if "snow" in c:
+            return (0.86, 0.94, 1.00, 1.0)
+        if "rain" in c or "shower" in c or "drizzle" in c:
+            return (0.25, 0.55, 1.00, 1.0)
+        if "cloud" in c or "fog" in c or "mist" in c:
+            return (0.72, 0.76, 0.80, 1.0)
+        return (1.00, 0.78, 0.18, 1.0)
+
+    @staticmethod
+    def _sun(x: float, y: float, z: float, size: float):
+        verts: list[tuple] = []
+        faces: list[tuple] = []
+        _append_face(verts, faces, _poly(x, y, z, size * 0.34, 16))
+        for i in range(8):
+            angle = math.pi * 2 * i / 8
+            dx = math.cos(angle)
+            dy = math.sin(angle)
+            px = -dy
+            py = dx
+            inner = size * 0.50
+            outer = size * 0.78
+            width = size * 0.10
+            _append_face(verts, faces, [
+                (x + dx * inner + px * width, y + dy * inner + py * width, z),
+                (x + dx * outer, y + dy * outer, z),
+                (x + dx * inner - px * width, y + dy * inner - py * width, z),
+            ])
+        return verts, faces
+
+    @staticmethod
+    def _cloud(x: float, y: float, z: float, size: float):
+        verts: list[tuple] = []
+        faces: list[tuple] = []
+        for cx, cy, r in [
+            (x - size * 0.26, y - size * 0.02, size * 0.30),
+            (x, y + size * 0.12, size * 0.38),
+            (x + size * 0.30, y - size * 0.04, size * 0.30),
+        ]:
+            _append_face(verts, faces, _poly(cx, cy, z, r, 12))
+        _append_face(verts, faces, _rect(x, y - size * 0.20, z, size * 0.95, size * 0.32))
+        return verts, faces
+
+    @staticmethod
+    def _rain(x: float, y: float, z: float, size: float):
+        verts, faces = WeatherSymbolLibrary._cloud(x, y + size * 0.14, z, size * 0.82)
+        for dx in (-0.25, 0.0, 0.25):
+            _append_face(verts, faces, [
+                (x + size * dx, y - size * 0.34, z),
+                (x + size * (dx + 0.08), y - size * 0.62, z),
+                (x + size * (dx - 0.06), y - size * 0.60, z),
+            ])
+        return verts, faces
+
+    @staticmethod
+    def _snow(x: float, y: float, z: float, size: float):
+        verts, faces = WeatherSymbolLibrary._cloud(x, y + size * 0.14, z, size * 0.82)
+        for dx in (-0.22, 0.12):
+            cx = x + size * dx
+            cy = y - size * 0.48
+            for angle in (0, math.pi / 3, -math.pi / 3):
+                ca = math.cos(angle)
+                sa = math.sin(angle)
+                l = size * 0.16
+                w = size * 0.025
+                _append_face(verts, faces, [
+                    (cx - ca * l - sa * w, cy - sa * l + ca * w, z),
+                    (cx + ca * l - sa * w, cy + sa * l + ca * w, z),
+                    (cx + ca * l + sa * w, cy + sa * l - ca * w, z),
+                    (cx - ca * l + sa * w, cy - sa * l - ca * w, z),
+                ])
+        return verts, faces
+
+    @staticmethod
+    def _storm(x: float, y: float, z: float, size: float):
+        verts, faces = WeatherSymbolLibrary._cloud(x, y + size * 0.16, z, size * 0.82)
+        _append_face(verts, faces, [
+            (x + size * 0.02, y - size * 0.16, z),
+            (x - size * 0.14, y - size * 0.50, z),
+            (x + size * 0.04, y - size * 0.46, z),
+            (x - size * 0.06, y - size * 0.78, z),
+            (x + size * 0.22, y - size * 0.34, z),
+            (x + size * 0.04, y - size * 0.38, z),
+        ])
+        return verts, faces
 
 
 def _arrow_mesh(cx: float, cy: float, cz: float, length: float, wind_dir: float):
@@ -98,8 +246,10 @@ class WeatherRenderer:
         # Scale icons to ~4% of the map's Blender-unit span
         icon_r = scene_scale.map_units * 0.04
         arrow_l = scene_scale.map_units * 0.055
-        text_sz = scene_scale.map_units * 0.030
-        z_off = scene_scale.map_units * 0.005
+        z_off = scaled_map_value(
+            float(getattr(settings, "weather_z_offset", 0.12)),
+            scene_scale,
+        )
 
         show_temp = getattr(settings, "weather_show_temperature", True)
         show_wind = getattr(settings, "weather_show_wind", True)
@@ -109,13 +259,16 @@ class WeatherRenderer:
             x, y, _ = projector.project(pt.lat, pt.lon)
             z = z_off
 
+            symbol = self._create_condition_symbol(context, pt, idx, x, y, z, icon_r)
+            if symbol:
+                created.append(symbol)
+
             if show_temp:
-                badge = self._create_temp_badge(context, pt, idx, x, y, z, icon_r)
+                badge = self._create_temp_badge(
+                    context, pt, idx, x - icon_r * 1.35, y, z, icon_r * 0.55
+                )
                 if badge:
                     created.append(badge)
-                label = self._create_temp_label(context, pt, idx, x, y, z, text_sz)
-                if label:
-                    created.append(label)
 
             if show_wind and pt.wind_speed > 0.5:
                 arrow = self._create_wind_arrow(
@@ -126,36 +279,42 @@ class WeatherRenderer:
 
         return created
 
-    def _create_temp_badge(self, context, pt, idx, x, y, z, r):
+    def _create_condition_symbol(self, context, pt, idx, x, y, z, size):
         import bpy as _bpy
-        name = f"Weather_Badge_{idx:03d}"
-        color = _temp_color(pt.temperature)
-        mat = material_named(f"GeoMap_WeatherTemp_{int(pt.temperature + 50)}", color)
-        verts = _octagon(x, y, z, r)
+        name = f"Weather_Symbol_{idx:03d}"
+        verts, faces = WeatherSymbolLibrary.build(pt.condition, x, y, z, size)
         mesh = _bpy.data.meshes.new(f"{name}_Mesh")
         obj = _bpy.data.objects.new(name, mesh)
         link_to_geomap_collection(context, obj, _COLLECTION)
-        mesh.from_pydata(verts, [], [tuple(range(8))])
+        mesh.from_pydata(verts, [], faces)
         mesh.update()
+        mat = material_named(
+            WeatherSymbolLibrary.material_name(pt.condition),
+            WeatherSymbolLibrary.color(pt.condition),
+        )
         obj.data.materials.append(mat)
-        obj["geomap_type"] = "weather_badge"
-        obj["weather_temp"] = round(pt.temperature, 1)
+        obj["geomap_type"] = "weather_symbol"
         obj["weather_condition"] = pt.condition
         return obj
 
-    def _create_temp_label(self, context, pt, idx, x, y, z, size):
+    def _create_temp_badge(self, context, pt, idx, x, y, z, r):
         import bpy as _bpy
-        name = f"Weather_Temp_{idx:03d}"
-        curve = _bpy.data.curves.new(f"{name}_Curve", "FONT")
-        curve.body = f"{pt.temperature:.0f}°"
-        curve.size = size
-        curve.align_x = "CENTER"
-        curve.align_y = "CENTER"
-        mat = material_named("GeoMap_WeatherText", (1.0, 1.0, 1.0, 1.0))
-        curve.materials.append(mat)
-        obj = _bpy.data.objects.new(name, curve)
-        obj.location = (x, y, z + size * 0.05)
+        name = f"Weather_TempSymbol_{idx:03d}"
+        color = _temp_color(pt.temperature)
+        mat = material_named(f"GeoMap_WeatherTemp_{int(pt.temperature + 50)}", color)
+        verts = []
+        faces = []
+        _append_face(verts, faces, _rect(x, y - r * 0.10, z, r * 0.34, r * 1.15))
+        _append_face(verts, faces, _poly(x, y - r * 0.78, z, r * 0.28, 12))
+        mesh = _bpy.data.meshes.new(f"{name}_Mesh")
+        obj = _bpy.data.objects.new(name, mesh)
         link_to_geomap_collection(context, obj, _COLLECTION)
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        obj.data.materials.append(mat)
+        obj["geomap_type"] = "weather_temperature_symbol"
+        obj["weather_temp"] = round(pt.temperature, 1)
+        obj["weather_condition"] = pt.condition
         return obj
 
     def _create_wind_arrow(self, context, pt, idx, x, y, z, length):

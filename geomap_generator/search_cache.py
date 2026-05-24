@@ -112,6 +112,7 @@ def snapshot_from_props(props) -> dict[str, Any]:
         "import_roads": props.import_roads,
         "import_admin": props.import_admin,
         "import_buildings": value("import_buildings", False),
+        "building_provider": value("building_provider", "AUTO"),
         "import_cities": props.import_cities,
         "import_poi_historic": props.import_poi_historic,
         "import_poi_cultural": props.import_poi_cultural,

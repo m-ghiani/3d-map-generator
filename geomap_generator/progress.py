@@ -13,6 +13,8 @@ class ProgressTracker:
         self._cancel_event = threading.Event()
         self.status = "Idle"
         self.progress = 0.0
+        self.weather_status = "Weather idle"
+        self.weather_progress = 0.0
         self.logs: list[str] = []
         self.is_running = False
         self.error: Optional[str] = None
@@ -75,6 +77,12 @@ class ProgressTracker:
             if progress is not None:
                 self.progress = max(0.0, min(1.0, progress))
 
+    def set_weather_status(self, status: str, progress: Optional[float] = None) -> None:
+        with self._lock:
+            self.weather_status = status
+            if progress is not None:
+                self.weather_progress = max(0.0, min(1.0, progress))
+
     def request_cancel(self) -> None:
         self._cancel_event.set()
 
@@ -85,6 +93,8 @@ class ProgressTracker:
         with self._lock:
             self.status = "Idle"
             self.progress = 0.0
+            self.weather_status = "Weather idle"
+            self.weather_progress = 0.0
             self.logs = []
             self.is_running = False
             self.error = None

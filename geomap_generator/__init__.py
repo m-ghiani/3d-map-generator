@@ -12,6 +12,10 @@ bl_info = {
     "category": "Object",
 }
 
+_REGISTERED_CLASSES = ()
+_SCENE_PROPS_REGISTERED = False
+_CONTEXT_MENUS_REGISTERED = False
+
 
 def _load_classes():
     import importlib
@@ -98,6 +102,7 @@ def _load_classes():
         GeoMapShowCoordinatesOperator,
         GeoMapSearchRoutePointOperator,
         GeoMapStoreBasemapTokenOperator,
+        GeoMapUpdateAddonOperator,
         GeoMapUpdateLayerOperator,
     )
     from .panels import (
@@ -108,6 +113,7 @@ def _load_classes():
         GeoMapPresetsPanel,
         GeoMapQualityPanel,
         GeoMapRoutePanel,
+        GeoMapToolbarPanel,
     )
     from .properties import GeoMapAddonPreferences, GeoMapProperties, GeoMapRouteItem
 
@@ -119,6 +125,7 @@ def _load_classes():
         GeoMapAddonPreferences,
         GeoMapRouteItem,
         GeoMapProperties,
+        GeoMapToolbarPanel,
         GeoMapPanel,
         GeoMapAnnotationsPanel,
         GeoMapKmzPanel,
@@ -138,6 +145,7 @@ def _load_classes():
         GeoMapRenameHistoryOperator,
         GeoMapClearHistoryOperator,
         GeoMapClearDownloadCacheOperator,
+        GeoMapUpdateAddonOperator,
         GeoMapCreatePlaceLabelOperator,
         GeoMapUpdateLayerOperator,
         GeoMapSearchRoutePointOperator,
@@ -162,21 +170,64 @@ def _draw_routes_context_menu(self, context):
         )
 
 
+def _draw_place_label_context_menu(self, context):
+    objects = list(getattr(context, "selected_objects", ()) or ())
+    active = getattr(context, "active_object", None)
+    if active is not None and active not in objects:
+        objects.append(active)
+
+    def _can_create_label(obj) -> bool:
+        layer = obj.get("geomap_layer", "") if obj is not None else ""
+        return layer == "place_label" or layer.startswith("poi_")
+
+    if not any(_can_create_label(obj) for obj in objects):
+        return
+
+    self.layout.separator()
+    self.layout.operator(
+        "geomap.create_place_label",
+        text="Create Label from Selected POI",
+        icon="FONT_DATA",
+    )
+
+
 def register():
+    global _CONTEXT_MENUS_REGISTERED, _REGISTERED_CLASSES, _SCENE_PROPS_REGISTERED
     import bpy
 
-    for cls in _load_classes():
+    classes = _load_classes()
+    for cls in classes:
         bpy.utils.register_class(cls)
+    _REGISTERED_CLASSES = classes
     from .properties import GeoMapProperties
 
     bpy.types.Scene.geomap_props = bpy.props.PointerProperty(type=GeoMapProperties)
-    bpy.types.VIEW3D_MT_object_context_menu.append(_draw_routes_context_menu)
+    _SCENE_PROPS_REGISTERED = True
+    if not _CONTEXT_MENUS_REGISTERED:
+        bpy.types.VIEW3D_MT_object_context_menu.append(_draw_routes_context_menu)
+        bpy.types.VIEW3D_MT_object_context_menu.append(_draw_place_label_context_menu)
+        _CONTEXT_MENUS_REGISTERED = True
 
 
 def unregister():
+    global _CONTEXT_MENUS_REGISTERED, _REGISTERED_CLASSES, _SCENE_PROPS_REGISTERED
     import bpy
 
-    bpy.types.VIEW3D_MT_object_context_menu.remove(_draw_routes_context_menu)
-    for cls in reversed(_load_classes()):
-        bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.geomap_props
+    if _CONTEXT_MENUS_REGISTERED:
+        for menu_func in (_draw_place_label_context_menu, _draw_routes_context_menu):
+            try:
+                bpy.types.VIEW3D_MT_object_context_menu.remove(menu_func)
+            except Exception:
+                pass
+        _CONTEXT_MENUS_REGISTERED = False
+
+    if _SCENE_PROPS_REGISTERED and hasattr(bpy.types.Scene, "geomap_props"):
+        del bpy.types.Scene.geomap_props
+        _SCENE_PROPS_REGISTERED = False
+
+    for cls in reversed(_REGISTERED_CLASSES):
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
+    _REGISTERED_CLASSES = ()
