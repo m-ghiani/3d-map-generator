@@ -87,6 +87,10 @@ class GeoMapDashboardOperator(Operator):
             "pick_on_map": lambda: bpy.ops.geomap.open_map_selector("INVOKE_DEFAULT"),
             "clear_history": lambda: bpy.ops.geomap.clear_history("INVOKE_DEFAULT"),
             "create_place_label": self._create_place_label_cb,
+            "import_kmz": self._import_kmz_cb,
+            "save_preset": (
+                lambda: self._run_geomap_operator("save_preset", "INVOKE_DEFAULT")
+            ),
             "route_add": _op_and_rebuild(lambda: bpy.ops.geomap.add_route("EXEC_DEFAULT")),
             "route_remove": _op_and_rebuild(lambda: bpy.ops.geomap.remove_route("EXEC_DEFAULT")),
             "route_pick_start": (
@@ -105,13 +109,21 @@ class GeoMapDashboardOperator(Operator):
             "route_import_all": (
                 lambda: self._run_geomap_operator("import_all_routes", "EXEC_DEFAULT")
             ),
-            "route_open_panel": (
-                lambda: self._run_geomap_operator("open_routes_popup", "INVOKE_DEFAULT")
+            "route_search_start": (
+                lambda: self._run_geomap_operator(
+                    "search_route_point", "EXEC_DEFAULT", target="START",
+                )
+            ),
+            "route_search_end": (
+                lambda: self._run_geomap_operator(
+                    "search_route_point", "EXEC_DEFAULT", target="END",
+                )
             ),
             **{
                 f"gen_{k}": _layer_cb(k) for k in (
                     "TERRAIN", "COASTLINES", "RIVERS", "ROADS",
                     "LANDUSE", "BUILDINGS", "CITIES", "WEATHER",
+                    "ANNOTATIONS",
                 )
             },
         }
@@ -132,9 +144,59 @@ class GeoMapDashboardOperator(Operator):
         except Exception:
             pass
 
+        try:
+            for i, _route in enumerate(list(getattr(props, "routes", []) or [])[:5]):
+                callbacks[f"route_select_{i}"] = _op_and_rebuild(
+                    lambda idx=i: setattr(props, "route_active_index", idx)
+                )
+        except Exception:
+            pass
+
+        kmz_entries: list[tuple[str, str, str]] = []
+        try:
+            from ..kmz import kmz_enum_items as _kmz_enum_items
+            kmz_entries = list(_kmz_enum_items(props, context))
+        except Exception:
+            pass
+
+        preset_entries: list[dict] = []
+        try:
+            from ..search_cache import load_presets as _load_presets
+            preset_entries = list((_load_presets() or [])[:8])
+            for i, preset in enumerate(preset_entries):
+                name = str(preset.get("preset_name") or "")
+                callbacks[f"load_preset_{i}"] = _op_and_rebuild(
+                    lambda preset_name=name: bpy.ops.geomap.load_preset(
+                        "EXEC_DEFAULT",
+                        preset_name=preset_name,
+                    )
+                )
+                callbacks[f"delete_preset_{i}"] = _op_and_rebuild(
+                    lambda preset_name=name: bpy.ops.geomap.delete_preset(
+                        "EXEC_DEFAULT",
+                        preset_name=preset_name,
+                    )
+                )
+        except Exception:
+            pass
+
+        layer_entries: list[dict] = []
+        try:
+            root = bpy.data.collections.get("GeoMap")
+            if root is not None:
+                layer_entries = [
+                    {"name": child.name, "layer": child}
+                    for child in root.children
+                ]
+        except Exception:
+            pass
+
         self._tree = build_widget_tree(
             props, tracker, region.width, region.height, callbacks,
             history_entries=history_entries,
+            kmz_entries=kmz_entries,
+            preset_entries=preset_entries,
+            layer_entries=layer_entries,
         )
         self._tab_bar = self._tree["tab_bar"]
         if active_tab_index is not None:
@@ -160,12 +222,32 @@ class GeoMapDashboardOperator(Operator):
             return
         bpy.ops.geomap.create_place_label("EXEC_DEFAULT")
 
+    def _import_kmz_cb(self) -> None:
+        """Import the selected KMZ catalog entry when one is available."""
+        try:
+            selection = str(bpy.context.scene.geomap_props.kmz_selection)
+        except Exception:
+            selection = "NONE"
+        if not selection or selection == "NONE":
+            self.report(
+                {"WARNING"},
+                "No KMZ selected. Add a matching catalog entry or select one first.",
+            )
+            return
+        self._run_geomap_operator("import_selected_kmz", "EXEC_DEFAULT")
+
     def _run_geomap_operator(self, name: str, execution_context: str, **kwargs) -> None:
         op = getattr(bpy.ops.geomap, name)
         if not op.poll():
             self.report({"WARNING"}, "This action is not available in the current context")
             return
-        op(execution_context, **kwargs)
+        try:
+            op(execution_context, **kwargs)
+        except RuntimeError as exc:
+            message = str(exc).strip() or "GeoMap action failed"
+            if message.startswith("Error: "):
+                message = message[7:]
+            self.report({"WARNING"}, message)
 
     def _make_close_cb(self, context) -> Callable[[], None]:
         """Return a closure that removes the draw handler and exits modal."""
@@ -226,6 +308,10 @@ class GeoMapDashboardOperator(Operator):
                 context.area.tag_redraw()
                 return {"RUNNING_MODAL"}
 
+        if event.value == "PRESS" and self._dispatch_key(event):
+            context.area.tag_redraw()
+            return {"RUNNING_MODAL"}
+
         if event.type == "ESC" and event.value == "PRESS":
             self._make_close_cb(context)()
             return {"FINISHED"}
@@ -251,20 +337,56 @@ class GeoMapDashboardOperator(Operator):
     def _dispatch_press(self, mx: int, my: int) -> None:
         """Dispatch mouse press to first widget that hits."""
         weather_before = None
+        input_mode_before = None
+        kmz_before = None
+        output_preset_before = None
+        create_map_box_before = None
         try:
             weather_before = bool(bpy.context.scene.geomap_props.import_weather)
+            input_mode_before = str(bpy.context.scene.geomap_props.input_mode)
+            kmz_before = str(bpy.context.scene.geomap_props.kmz_selection)
+            output_preset_before = str(bpy.context.scene.geomap_props.output_preset)
+            create_map_box_before = bool(bpy.context.scene.geomap_props.create_map_box)
         except Exception:
             pass
+        handled = False
         for w in self._all_widgets():
             if w.on_mouse_press(mx, my):
+                handled = True
                 try:
                     weather_after = bool(bpy.context.scene.geomap_props.import_weather)
+                    input_mode_after = str(bpy.context.scene.geomap_props.input_mode)
+                    kmz_after = str(bpy.context.scene.geomap_props.kmz_selection)
+                    output_preset_after = str(bpy.context.scene.geomap_props.output_preset)
+                    create_map_box_after = bool(bpy.context.scene.geomap_props.create_map_box)
                 except Exception:
                     weather_after = weather_before
-                if weather_before is not None and weather_after != weather_before:
+                    input_mode_after = input_mode_before
+                    kmz_after = kmz_before
+                    output_preset_after = output_preset_before
+                    create_map_box_after = create_map_box_before
+                if (
+                    (weather_before is not None and weather_after != weather_before)
+                    or (
+                        input_mode_before is not None
+                        and input_mode_after != input_mode_before
+                    )
+                    or (kmz_before is not None and kmz_after != kmz_before)
+                    or (
+                        output_preset_before is not None
+                        and output_preset_after != output_preset_before
+                    )
+                    or (
+                        create_map_box_before is not None
+                        and create_map_box_after != create_map_box_before
+                    )
+                ):
                     idx = self._tab_bar.active_index if self._tab_bar is not None else 0
                     self._build_tree(bpy.context, idx)
                 return
+        if not handled:
+            for w in self._all_widgets():
+                w.blur()
 
     def _dispatch_release(self, mx: int, my: int) -> None:
         """Dispatch mouse release to all widgets (for button release detection)."""
@@ -275,6 +397,13 @@ class GeoMapDashboardOperator(Operator):
         """Dispatch mouse move to all widgets for hover state."""
         for w in self._all_widgets():
             w.on_mouse_move(mx, my)
+
+    def _dispatch_key(self, event) -> bool:
+        """Dispatch keyboard events to focused widgets."""
+        for w in self._all_widgets():
+            if w.on_key(event):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Draw callback (POST_PIXEL — called from GPU context)
@@ -288,18 +417,21 @@ class GeoMapDashboardOperator(Operator):
                 return
             r = op._overlay_rect
 
-            # Overlay background, styled close to Blender's dark UI panels.
-            draw_rect(r.x, r.y, r.w, r.h, (0.105, 0.105, 0.105, 0.94))
-            draw_rect(r.x, r.y + r.h - 36.0, r.w, 36.0, (0.075, 0.075, 0.075, 0.98))
-            draw_rect(r.x, r.y, r.w, 1.0, (0.02, 0.02, 0.02, 1.0))
-            draw_rect(r.x, r.y + r.h - 1.0, r.w, 1.0, (0.30, 0.30, 0.30, 0.95))
-            draw_rect(r.x, r.y, 1.0, r.h, (0.02, 0.02, 0.02, 1.0))
-            draw_rect(r.x + r.w - 1.0, r.y, 1.0, r.h, (0.02, 0.02, 0.02, 1.0))
+            # Overlay background — Blender 4.x default dark theme exact values.
+            # Content area: region background rgb(40,40,40).
+            draw_rect(r.x, r.y, r.w, r.h, (0.157, 0.157, 0.157, 0.97))
+            # Tab header strip: slightly darker, matching panel header rgb(35,35,35).
+            draw_rect(r.x, r.y + r.h - 36.0, r.w, 36.0, (0.137, 0.137, 0.137, 1.0))
+            # Outer border: near-black edges rgb(5,5,5).
+            draw_rect(r.x, r.y, r.w, 1.0, (0.020, 0.020, 0.020, 1.0))
+            draw_rect(r.x, r.y + r.h - 1.0, r.w, 1.0, (0.020, 0.020, 0.020, 1.0))
+            draw_rect(r.x, r.y, 1.0, r.h, (0.020, 0.020, 0.020, 1.0))
+            draw_rect(r.x + r.w - 1.0, r.y, 1.0, r.h, (0.020, 0.020, 0.020, 1.0))
 
-            # Separators
+            # Separators — subdued, matching Blender panel divider rgb(51,51,51).
             if op._sep_btm_y is not None:
-                draw_rect(r.x, op._sep_btm_y, r.w, 1.0, (0.25, 0.25, 0.25, 1.0))
-            draw_rect(r.x, r.y + r.h - 36.0, r.w, 1.0, (0.24, 0.24, 0.24, 1.0))
+                draw_rect(r.x, op._sep_btm_y, r.w, 1.0, (0.200, 0.200, 0.200, 1.0))
+            draw_rect(r.x, r.y + r.h - 36.0, r.w, 1.0, (0.200, 0.200, 0.200, 1.0))
 
             # All widgets
             for w in op._all_widgets():

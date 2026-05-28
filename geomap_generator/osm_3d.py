@@ -1,6 +1,5 @@
-import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import bpy
 
@@ -11,16 +10,86 @@ from .geometry_payload import (
     BuildingMeshPayload,
     build_building_payload,
 )
-from .mesh_builder import BboxProjector
 from .models import BoundingBox, OsmNode, OsmWay
 from .overpass import OsmApiClient
 from .threading_utils import assert_main_thread
 
 _DEFAULT_BUILDING_HEIGHT_M = 9.0
+# Per-level height for buildings lacking an explicit height tag.
+# map3d uses 2.2 m; industry average (residential + commercial mix) is ~2.8 m.
+_LEVEL_HEIGHT_M = 2.8
 
 # bbox diagonal (km) threshold for AUTO LOD: below = DETAILED, above = SIMPLE
 _AUTO_LOD_DETAILED_KM = 2.5
 _AUTO_LOD_SIMPLE_KM = 15.0
+
+# ---------------------------------------------------------------------------
+# Batch material palette: OSM building:material → RGBA linear colour
+# Used for SIMPLE/batch mode to colour-code building meshes by material type.
+# ---------------------------------------------------------------------------
+_BATCH_MATERIAL_COLORS: dict[str, tuple[float, float, float, float]] = {
+    "brick":          (0.55, 0.28, 0.15, 1.0),
+    "stone":          (0.58, 0.54, 0.48, 1.0),
+    "concrete":       (0.52, 0.52, 0.50, 1.0),
+    "plaster":        (0.82, 0.78, 0.70, 1.0),
+    "render":         (0.82, 0.78, 0.70, 1.0),
+    "glass":          (0.72, 0.82, 0.90, 1.0),
+    "metal":          (0.75, 0.75, 0.78, 1.0),
+    "steel":          (0.72, 0.72, 0.75, 1.0),
+    "wood":           (0.48, 0.32, 0.18, 1.0),
+    "timber_framing": (0.58, 0.44, 0.28, 1.0),
+}
+_BATCH_DEFAULT_COLOR: tuple[float, float, float, float] = (0.55, 0.52, 0.46, 1.0)
+
+
+def building_batch_material_key(tags: dict[str, str]) -> str:
+    """Return a stable material category key for batch-mesh colouring."""
+    mat = (tags.get("building:material") or "").lower()
+    return mat if mat in _BATCH_MATERIAL_COLORS else "default"
+
+
+def building_batch_color(key: str) -> tuple[float, float, float, float]:
+    """Return the RGBA linear colour for a batch material key."""
+    return _BATCH_MATERIAL_COLORS.get(key, _BATCH_DEFAULT_COLOR)
+
+
+# ---------------------------------------------------------------------------
+# building:part aggregation helpers
+# ---------------------------------------------------------------------------
+
+def aggregate_building_parts(buildings: list) -> list:
+    """Remove base building footprints superseded by building:part children.
+
+    When building:part ways compose the full 3-D shape of a building, rendering
+    the parent building=yes footprint on top causes Z-fighting and inflated
+    geometry. This function discards any base building whose bounding box
+    overlaps with at least one building:part.
+    """
+    parts = [b for b in buildings if b.tags.get("building:part")]
+    bases = [b for b in buildings if not b.tags.get("building:part")]
+
+    if not parts:
+        return buildings
+
+    part_bboxes = [_geo_bbox(b.geometry) for b in parts]
+    result = list(parts)
+    for base in bases:
+        base_bbox = _geo_bbox(base.geometry)
+        if not any(_geo_bboxes_overlap(base_bbox, pb) for pb in part_bboxes):
+            result.append(base)
+    return result
+
+
+def _geo_bbox(geometry: list) -> tuple[float, float, float, float]:
+    lats = [n.lat for n in geometry]
+    lons = [n.lon for n in geometry]
+    return min(lats), min(lons), max(lats), max(lons)
+
+
+def _geo_bboxes_overlap(a: tuple, b: tuple) -> bool:
+    """Return True when two lat/lon bboxes intersect."""
+    return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+
 
 # CSS-style hex colour → linear RGB (approximate, gamma 2.2)
 _COLOUR_NAME_MAP: dict[str, tuple[float, float, float]] = {
@@ -105,17 +174,141 @@ def building_material_from_tags(tags: dict[str, str]) -> tuple[
 
 @dataclass(frozen=True)
 class Osm3DBuilding:
+    """Parsed OSM building or building:part ready for 3D extrusion."""
+
     id: int
     name: str
-    geometry: list[OsmNode]
+    geometry: list[OsmNode]      # outer footprint ring (closed, no duplicate end node)
     tags: dict[str, str]
-    height_m: float
+    height_m: float              # total height above ground (from OSM height/levels tags)
     center_lat: float
     center_lon: float
+    min_height_m: float = 0.0    # base height above ground (building:part floating sections)
+    inner_rings: tuple = field(  # courtyard rings; tuple[list[OsmNode], ...]
+        default_factory=tuple,
+    )
+    # S3DB extended tags
+    roof_shape: str = ""         # flat | pyramidal | gabled | hipped | dome | mansard | …
+    roof_height_m: float = 0.0   # height of roof portion only (OSM roof:height tag)
+    roof_direction: float = 0.0  # ridge orientation degrees, 0=north/+Y, 90=east/+X
+    building_layer: int = 0      # OSM layer tag (positive=bridge/elevated, negative=tunnel)
+
+
+@dataclass
+class Osm3DModelCandidate:
+    id: int
+    osm_type: str
+    name: str
+    lat: float
+    lon: float
+    tags: dict[str, str]
+    has_geometry: bool = False
 
 
 class Osm3DModelClient:
+    def list_model_candidates(
+        self,
+        bbox: BoundingBox,
+        provider: str = "AUTO",
+        limit: int = 300,
+    ) -> list[Osm3DModelCandidate]:
+        query = self._build_candidate_query(bbox, limit)
+        raw = OsmApiClient._fetch_overpass_json(query, provider=provider)
+        return self._parse_model_candidates(raw)
+
+    def fetch_model_by_id(
+        self,
+        osm_id: int,
+        osm_type: str | None,
+        provider: str = "AUTO",
+        debug_log=None,
+    ) -> Osm3DBuilding:
+        for require_building in (True, False):
+            direct_query = self._build_direct_query(
+                osm_id,
+                osm_type,
+                require_building=require_building,
+            )
+            if debug_log:
+                debug_log(
+                    "3D model direct query "
+                    f"osm_type={osm_type} osm_id={osm_id} "
+                    f"require_building={require_building} provider={provider}"
+                )
+            raw = OsmApiClient._fetch_overpass_json(direct_query, provider=provider)
+            if debug_log:
+                elements = raw.get("elements", []) if isinstance(raw, dict) else []
+                types = [
+                    str(item.get("type", "?"))
+                    for item in elements[:8]
+                    if isinstance(item, dict)
+                ]
+                debug_log(
+                    "3D model Overpass response "
+                    f"elements={len(elements)} first_types={types}"
+                )
+            candidates = self._parse_buildings(raw)
+            if debug_log:
+                debug_log(f"3D model parsed closed candidates={len(candidates)}")
+            if candidates:
+                return candidates[0]
+            node_query = self._build_direct_node_query(
+                osm_id,
+                osm_type,
+                require_building=require_building,
+            )
+            if debug_log:
+                debug_log(
+                    "3D model direct node query "
+                    f"osm_type={osm_type} osm_id={osm_id} "
+                    f"require_building={require_building} provider={provider}"
+                )
+            raw = OsmApiClient._fetch_overpass_json(node_query, provider=provider)
+            if debug_log:
+                elements = raw.get("elements", []) if isinstance(raw, dict) else []
+                types = [
+                    str(item.get("type", "?"))
+                    for item in elements[:8]
+                    if isinstance(item, dict)
+                ]
+                debug_log(
+                    "3D model node response "
+                    f"elements={len(elements)} first_types={types}"
+                )
+            candidates = self._parse_buildings(raw)
+            if debug_log:
+                debug_log(f"3D model parsed node candidates={len(candidates)}")
+            if candidates:
+                return candidates[0]
+        raise ProviderError("Selected 3D model marker is not a closed OSM area.")
+
+    def fetch_buildings_in_bbox(
+        self,
+        bbox: BoundingBox,
+        provider: str = "AUTO",
+    ) -> list[Osm3DBuilding]:
+        """Fetch ALL buildings in the bounding box via a single Overpass query.
+
+        Mirrors the map3d batch approach: queries way["building"] + relation["building"]
+        (plus building:part) with ``out body geom`` so full geometry is returned in one
+        round-trip, avoiding the need to re-resolve node references.
+        """
+        bounds = bbox.to_overpass()
+        query = f"""
+        [out:json][timeout:60];
+        (
+          way["building"]({bounds});
+          way["building:part"]({bounds});
+          relation["building"]({bounds});
+          relation["building:part"]({bounds});
+        );
+        out body geom;
+        """
+        raw = OsmApiClient._fetch_overpass_json(query, provider=provider)
+        return self._parse_buildings(raw)
+
     def buildings_from_ways(self, ways: list[OsmWay]) -> list[Osm3DBuilding]:
+        """Convert pre-fetched OSM ways tagged building/building:part to Osm3DBuilding list."""
         buildings = []
         for way in ways:
             if not self._is_building(way.tags):
@@ -133,6 +326,11 @@ class Osm3DModelClient:
                     height_m=self._height_m(tags),
                     center_lat=sum(node.lat for node in geometry) / len(geometry),
                     center_lon=sum(node.lon for node in geometry) / len(geometry),
+                    min_height_m=self._min_height_m(tags),
+                    roof_shape=self._roof_shape(tags),
+                    roof_height_m=self._roof_height_m(tags),
+                    roof_direction=self._roof_direction(tags),
+                    building_layer=self._building_layer(tags),
                 )
             )
         return buildings
@@ -169,6 +367,106 @@ class Osm3DModelClient:
         return min(candidates, key=lambda item: self._distance_sq(lat, lon, item))
 
     @staticmethod
+    def _build_candidate_query(bbox: BoundingBox, limit: int) -> str:
+        bounds = bbox.to_overpass()
+        return f"""
+        [out:json][timeout:25];
+        (
+          way({bounds})["building"]["name"];
+          relation({bounds})["building"]["name"];
+          way({bounds})["historic"];
+          relation({bounds})["historic"];
+          way({bounds})["historic"]["name"];
+          relation({bounds})["historic"]["name"];
+          way({bounds})["tourism"="attraction"];
+          relation({bounds})["tourism"="attraction"];
+          way({bounds})["tourism"]["name"];
+          relation({bounds})["tourism"]["name"];
+          way({bounds})["heritage"];
+          relation({bounds})["heritage"];
+          way({bounds})["wikidata"];
+          relation({bounds})["wikidata"];
+          way({bounds})["amenity"="place_of_worship"]["name"];
+          relation({bounds})["amenity"="place_of_worship"]["name"];
+        );
+        out body geom {int(limit)};
+        """
+
+    @staticmethod
+    def _parse_model_candidates(raw: dict) -> list[Osm3DModelCandidate]:
+        candidates: list[Osm3DModelCandidate] = []
+        seen: set[tuple[str, int]] = set()
+        for element in raw.get("elements", []):
+            if not isinstance(element, dict):
+                continue
+            osm_type = str(element.get("type", ""))
+            if osm_type not in {"way", "relation"}:
+                continue
+            geometry = Osm3DModelClient._parse_geometry(element)
+            center = element.get("center") or {}
+            lat = center.get("lat")
+            lon = center.get("lon")
+            if lat is None or lon is None:
+                if len(geometry) < 3:
+                    continue
+                lat, lon = Osm3DModelClient._center(element, geometry)
+            osm_id = int(element.get("id", 0) or 0)
+            if osm_id <= 0 or (osm_type, osm_id) in seen:
+                continue
+            seen.add((osm_type, osm_id))
+            tags = element.get("tags") or {}
+            name = tags.get("name") or tags.get("building") or tags.get("historic")
+            if not name:
+                name = "OSM 3D Model"
+            candidates.append(
+                Osm3DModelCandidate(
+                    id=osm_id,
+                    osm_type=osm_type,
+                    name=str(name),
+                    lat=float(lat),
+                    lon=float(lon),
+                    tags={str(k): str(v) for k, v in tags.items()},
+                    has_geometry=len(geometry) >= 3,
+                )
+            )
+        return sorted(candidates, key=Osm3DModelClient._candidate_sort_key)
+
+    @staticmethod
+    def _candidate_sort_key(candidate: Osm3DModelCandidate) -> tuple[int, str]:
+        tags = candidate.tags
+        score = 0
+        name = candidate.name.lower()
+        if tags.get("wikidata"):
+            score += 1000
+        if tags.get("wikipedia"):
+            score += 800
+        if tags.get("heritage"):
+            score += 500
+        if tags.get("tourism") == "attraction":
+            score += 400
+        if tags.get("historic"):
+            score += 350
+        if tags.get("building"):
+            score += 120
+        if tags.get("amenity") == "place_of_worship":
+            score += 80
+        if candidate.has_geometry:
+            score += 60
+        for landmark_word in (
+            "colosseo",
+            "colosseum",
+            "foro",
+            "pantheon",
+            "basilica",
+            "castel",
+            "palazzo",
+        ):
+            if landmark_word in name:
+                score += 1200
+                break
+        return (-score, name)
+
+    @staticmethod
     def _build_direct_query(
         osm_id: int,
         osm_type: str | None,
@@ -189,7 +487,33 @@ class Osm3DModelClient:
         (
           {"".join(filters)}
         );
-        out tags geom center;
+        out body geom;
+        """
+
+    @staticmethod
+    def _build_direct_node_query(
+        osm_id: int,
+        osm_type: str | None,
+        require_building: bool,
+    ) -> str:
+        filters = []
+        suffixes = (
+            ('["building"]', '["building:part"]')
+            if require_building
+            else ("",)
+        )
+        if osm_type in {"way", None, ""}:
+            filters.extend(f"way(id:{osm_id}){suffix};" for suffix in suffixes)
+        if osm_type in {"relation", None, ""}:
+            filters.extend(f"relation(id:{osm_id}){suffix};" for suffix in suffixes)
+        return f"""
+        [out:json][timeout:25];
+        (
+          {"".join(filters)}
+        );
+        out body;
+        >;
+        out skel qt;
         """
 
     @staticmethod
@@ -203,7 +527,7 @@ class Osm3DModelClient:
         (
           {"".join(filters)}
         );
-        out tags geom center;
+        out body geom;
         """
 
     @staticmethod
@@ -216,57 +540,113 @@ class Osm3DModelClient:
           relation(around:{radius_m},{lat:.7f},{lon:.7f})["building"];
           relation(around:{radius_m},{lat:.7f},{lon:.7f})["building:part"];
         );
-        out tags geom center;
+        out body geom;
         """
 
     def _parse_buildings(self, raw: dict) -> list[Osm3DBuilding]:
         buildings = []
+        node_index: dict[int, OsmNode] = {}
+        for element in raw.get("elements", []):
+            if not isinstance(element, dict) or element.get("type") != "node":
+                continue
+            node_id = element.get("id")
+            lat = element.get("lat")
+            lon = element.get("lon")
+            if node_id is None or lat is None or lon is None:
+                continue
+            node_index[int(node_id)] = OsmNode(
+                id=int(node_id),
+                lat=float(lat),
+                lon=float(lon),
+                tags=element.get("tags") or {},
+            )
         for element in raw.get("elements", []):
             if not isinstance(element, dict) or element.get("type") not in {"way", "relation"}:
                 continue
-            geometry = self._parse_geometry(element)
-            if len(geometry) < 3:
+            if element.get("type") == "relation":
+                outer, inner_rings = self._parse_relation_rings(element)
+            else:
+                outer = self._parse_geometry(element, node_index)
+                inner_rings = ()
+            if len(outer) < 3:
                 continue
             tags = element.get("tags") or {}
-            height_m = self._height_m(tags)
-            center_lat, center_lon = self._center(element, geometry)
+            center_lat, center_lon = self._center(element, outer)
             buildings.append(
                 Osm3DBuilding(
                     id=element.get("id", 0),
                     name=tags.get("name") or tags.get("building") or "OSM Building",
-                    geometry=geometry,
+                    geometry=outer,
                     tags=tags,
-                    height_m=height_m,
+                    height_m=self._height_m(tags),
                     center_lat=center_lat,
                     center_lon=center_lon,
+                    min_height_m=self._min_height_m(tags),
+                    inner_rings=inner_rings,
+                    roof_shape=self._roof_shape(tags),
+                    roof_height_m=self._roof_height_m(tags),
+                    roof_direction=self._roof_direction(tags),
+                    building_layer=self._building_layer(tags),
                 )
             )
         return buildings
 
     @staticmethod
-    def _parse_geometry(element: dict) -> list[OsmNode]:
+    def _parse_geometry(
+        element: dict,
+        node_index: dict[int, OsmNode] | None = None,
+    ) -> list[OsmNode]:
         if element.get("type") == "relation":
             return Osm3DModelClient._parse_relation_geometry(element)
 
         geometry = Osm3DModelClient._geometry_from_items(element.get("geometry", []))
+        if not geometry and node_index:
+            geometry = [
+                node_index[int(node_id)]
+                for node_id in element.get("nodes", [])
+                if int(node_id) in node_index
+            ]
+            if len(geometry) > 1:
+                first = geometry[0]
+                last = geometry[-1]
+                if abs(first.lat - last.lat) < 1e-9 and abs(first.lon - last.lon) < 1e-9:
+                    geometry = geometry[:-1]
+                else:
+                    geometry = []
         return geometry if len(geometry) >= 3 else []
 
     @staticmethod
     def _parse_relation_geometry(element: dict) -> list[OsmNode]:
-        rings = []
+        """Return largest outer ring of a relation (legacy — use _parse_relation_rings)."""
+        outer, _inner = Osm3DModelClient._parse_relation_rings(element)
+        return outer
+
+    @staticmethod
+    def _parse_relation_rings(
+        element: dict,
+    ) -> tuple[list[OsmNode], tuple[list[OsmNode], ...]]:
+        """Parse a building relation into (outer_ring, inner_rings).
+
+        Outer ring = largest outer member way (main footprint).
+        Inner rings = member ways with role 'inner' (courtyards / holes).
+        """
+        outer_rings: list[list[OsmNode]] = []
+        inner_rings: list[list[OsmNode]] = []
         for member in element.get("members", []):
-            if not isinstance(member, dict):
+            if not isinstance(member, dict) or member.get("type") != "way":
                 continue
-            if member.get("type") != "way":
-                continue
-            if member.get("role") not in {"outer", ""}:
-                continue
+            role = member.get("role", "")
             geometry = Osm3DModelClient._geometry_from_items(member.get("geometry", []))
-            if len(geometry) >= 3:
-                rings.append(geometry)
-        if not rings:
-            return []
-        return max(rings, key=Osm3DModelClient._ring_area_abs)
+            if len(geometry) < 3:
+                continue
+            if role in {"outer", ""}:
+                outer_rings.append(geometry)
+            elif role == "inner":
+                inner_rings.append(geometry)
+        if not outer_rings:
+            return [], ()
+        outer = max(outer_rings, key=Osm3DModelClient._ring_area_abs)
+        return outer, tuple(inner_rings)
 
     @staticmethod
     def _geometry_from_items(items: list) -> list[OsmNode]:
@@ -295,12 +675,53 @@ class Osm3DModelClient:
 
     @staticmethod
     def _height_m(tags: dict[str, str]) -> float:
+        """Resolve building height in metres from OSM tags.
+
+        Priority (same as map3d): explicit height tag → levels × _LEVEL_HEIGHT_M → default.
+        """
         for key in ("height", "building:height", "est_height"):
             height = _parse_number(tags.get(key))
             if height:
                 return height
         levels = _parse_number(tags.get("building:levels"))
-        return levels * 3.0 if levels else _DEFAULT_BUILDING_HEIGHT_M
+        return levels * _LEVEL_HEIGHT_M if levels else _DEFAULT_BUILDING_HEIGHT_M
+
+    @staticmethod
+    def _min_height_m(tags: dict[str, str]) -> float:
+        """Resolve the height above ground where a building:part starts.
+
+        Used for floating sections (e.g. overhangs, elevated podium blocks).
+        Priority: min_height tag → building:min_level × _LEVEL_HEIGHT_M → 0.
+        """
+        h = _parse_number(tags.get("min_height"))
+        if h:
+            return h
+        levels = _parse_number(tags.get("building:min_level"))
+        return levels * _LEVEL_HEIGHT_M if levels else 0.0
+
+    @staticmethod
+    def _roof_shape(tags: dict[str, str]) -> str:
+        """Return normalised roof:shape tag value (empty string = flat/default)."""
+        return (tags.get("roof:shape") or "").lower().strip()
+
+    @staticmethod
+    def _roof_height_m(tags: dict[str, str]) -> float:
+        """Resolve roof height in metres: roof:height tag → roof:levels × _LEVEL_HEIGHT_M → 0."""
+        h = _parse_number(tags.get("roof:height"))
+        if h > 0:
+            return h
+        levels = _parse_number(tags.get("roof:levels"))
+        return levels * _LEVEL_HEIGHT_M if levels else 0.0
+
+    @staticmethod
+    def _roof_direction(tags: dict[str, str]) -> float:
+        """Return roof ridge direction in degrees (0=north/+Y, 90=east/+X)."""
+        return _parse_number(tags.get("roof:direction"))
+
+    @staticmethod
+    def _building_layer(tags: dict[str, str]) -> int:
+        """Return OSM layer tag as int (positive=elevated, negative=underground)."""
+        return int(_parse_number(tags.get("layer")) or 0)
 
     @staticmethod
     def _center(element: dict, geometry: list[OsmNode]) -> tuple[float, float]:
@@ -367,7 +788,7 @@ class Osm3DModelRenderer:
         return obj
 
     @staticmethod
-    def _osm_material(building_id: int, tags: dict[str, str]):
+    def _osm_material(_building_id: int, tags: dict[str, str]):
         color_rgba, roughness, metallic = building_material_from_tags(tags)
         mat_key = (
             f"GeoMap_3D_Bld_{tags.get('building:material','')}"
@@ -403,9 +824,22 @@ class Osm3DModelRenderer:
         link_to_geomap_collection(context, obj, "3D Models")
         mesh.from_pydata(payload.verts, [], payload.faces)
         mesh.update()
-        obj.data.materials.append(
-            material_named("GeoMap_3D_Building_Material", (0.55, 0.52, 0.46, 1.0))
-        )
+        color = getattr(payload, "material_color", (0.55, 0.52, 0.46, 1.0))
+        mat_name = f"GeoMap_3D_Batch_{batch_index}"
+        mat = bpy.data.materials.get(mat_name) or bpy.data.materials.new(mat_name)
+        mat.use_nodes = True
+        mat.diffuse_color = color
+        tree = mat.node_tree
+        if tree:
+            bsdf = next(
+                (n for n in tree.nodes if getattr(n, "type", None) == "BSDF_PRINCIPLED"),
+                None,
+            )
+            if bsdf:
+                bc = bsdf.inputs.get("Base Color")
+                if bc:
+                    bc.default_value = color
+        obj.data.materials.append(mat)
         obj["geomap_layer"] = "osm_3d_buildings_batch"
         obj["geomap_batch_index"] = batch_index
         obj["geomap_building_count"] = payload.building_count

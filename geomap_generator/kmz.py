@@ -31,12 +31,41 @@ def load_kmz_catalog() -> list[dict]:
 def kmz_entries_for_bbox(bbox: BoundingBox | None) -> list[dict]:
     entries = []
     for entry in load_kmz_catalog():
-        if not _valid_entry(entry):
+        if not _valid_entry(entry) or _entry_type(entry) not in {"kmz", "kml"}:
             continue
         entry_bbox = _entry_bbox(entry)
         if bbox is None or entry_bbox is None or _intersects(bbox, entry_bbox):
             entries.append(entry)
     return entries
+
+
+def asset_entries_for_bbox(bbox: BoundingBox | None) -> list[dict]:
+    entries = []
+    for entry in load_kmz_catalog():
+        if not _valid_entry(entry):
+            continue
+        entry_type = _entry_type(entry)
+        if entry_type not in {"kmz", "kml", "glb", "gltf"}:
+            continue
+        entry_bbox = _entry_bbox(entry)
+        if bbox is None or entry_bbox is None or _intersects(bbox, entry_bbox):
+            entries.append(entry)
+    return entries
+
+
+def asset_entry_location(entry: dict) -> tuple[float, float] | None:
+    try:
+        if entry.get("lat") is not None and entry.get("lon") is not None:
+            return float(entry["lat"]), float(entry["lon"])
+        bbox = _entry_bbox(entry)
+        if bbox is not None:
+            return (
+                (bbox.min_lat + bbox.max_lat) / 2.0,
+                (bbox.min_lon + bbox.max_lon) / 2.0,
+            )
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def kmz_enum_items(_self, context) -> list[tuple[str, str, str]]:
@@ -104,20 +133,32 @@ def current_map_bbox() -> BoundingBox | None:
 
 
 def download_kmz(entry: dict) -> Path:
-    url = str(entry.get("url") or "")
-    if not url:
-        raise RuntimeError("KMZ catalog entry has no URL")
+    path = download_catalog_asset(entry, namespace="kmz")
+    if path.suffix.lower() in {".kmz", ".kml"}:
+        return path
+    raise RuntimeError("Catalog entry is not a KMZ/KML asset")
+
+
+def download_catalog_asset(entry: dict, namespace: str = "assets") -> Path:
+    source = str(entry.get("url") or entry.get("path") or "")
+    if not source:
+        raise RuntimeError("Catalog entry has no URL or path")
+    if not source.startswith(("http://", "https://")):
+        path = Path(source).expanduser()
+        if not path.exists():
+            raise RuntimeError(f"Catalog asset file not found: {path}")
+        return path
 
     def fetch() -> bytes:
-        req = urllib.request.Request(url, headers={"User-Agent": "GeoMapGenerator/2.0"})
+        req = urllib.request.Request(source, headers={"User-Agent": "GeoMapGenerator/2.0"})
         with urllib.request.urlopen(req, timeout=60) as response:
             return response.read()
 
-    data = cached_bytes("kmz", url, _KMZ_CACHE_TTL_SECONDS, fetch)
-    suffix = ".kmz" if url.lower().endswith(".kmz") else ".kml"
-    path = Path(tempfile.gettempdir()) / "geomap_generator" / "kmz"
-    path.mkdir(parents=True, exist_ok=True)
-    target = path / f"{_safe_filename(str(entry.get('id') or Path(url).stem))}{suffix}"
+    data = cached_bytes(namespace, source, _KMZ_CACHE_TTL_SECONDS, fetch)
+    suffix = _entry_suffix(entry, source)
+    cache_dir = Path(tempfile.gettempdir()) / "geomap_generator" / namespace
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{_safe_filename(str(entry.get('id') or Path(source).stem))}{suffix}"
     target.write_bytes(data)
     return target
 
@@ -175,7 +216,24 @@ def catalog_paths() -> tuple[Path, Path]:
 
 
 def _valid_entry(entry: dict) -> bool:
-    return bool(entry.get("url") and (entry.get("id") or entry.get("name")))
+    return bool((entry.get("url") or entry.get("path")) and (entry.get("id") or entry.get("name")))
+
+
+def _entry_type(entry: dict) -> str:
+    explicit = str(entry.get("type") or entry.get("asset_type") or "").lower().strip(".")
+    if explicit:
+        return explicit
+    source = str(entry.get("url") or entry.get("path") or "").lower()
+    suffix = Path(source.split("?", 1)[0]).suffix.lower().strip(".")
+    return suffix or "kmz"
+
+
+def _entry_suffix(entry: dict, source: str) -> str:
+    suffix = Path(source.split("?", 1)[0]).suffix.lower()
+    if suffix:
+        return suffix
+    entry_type = _entry_type(entry)
+    return f".{entry_type}" if entry_type else ".bin"
 
 
 def _entry_bbox(entry: dict) -> BoundingBox | None:

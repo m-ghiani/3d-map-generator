@@ -52,6 +52,7 @@ def _load_classes():
         "geocoder",
         "route_fetcher",
         "service_client",
+        "model_library",
         "weather",
         "weather_renderer",
     ):
@@ -90,11 +91,11 @@ def _load_classes():
         GeoMapGenerateOperator,
         GeoMapImportAllRoutesOperator,
         GeoMapImportRouteOperator,
+        GeoMapImportSelectedModelCandidateOperator,
         GeoMapImportSelectedKmzOperator,
         GeoMapImportSelectedPoi3DOperator,
         GeoMapLoadHistoryOperator,
         GeoMapLoadPresetOperator,
-        GeoMapOpenRoutesPanelOperator,
         GeoMapRegenerateFromCacheOperator,
         GeoMapRemoveRouteOperator,
         GeoMapRenameHistoryOperator,
@@ -106,13 +107,7 @@ def _load_classes():
         GeoMapUpdateLayerOperator,
     )
     from .panels import (
-        GeoMapAnnotationsPanel,
-        GeoMapKmzPanel,
-        GeoMapLayerVisibilityPanel,
         GeoMapPanel,
-        GeoMapPresetsPanel,
-        GeoMapQualityPanel,
-        GeoMapRoutePanel,
         GeoMapToolbarPanel,
     )
     from .properties import GeoMapAddonPreferences, GeoMapProperties, GeoMapRouteItem
@@ -127,12 +122,6 @@ def _load_classes():
         GeoMapProperties,
         GeoMapToolbarPanel,
         GeoMapPanel,
-        GeoMapAnnotationsPanel,
-        GeoMapKmzPanel,
-        GeoMapQualityPanel,
-        GeoMapPresetsPanel,
-        GeoMapLayerVisibilityPanel,
-        GeoMapRoutePanel,
         GeoMapGenerateOperator,
         GeoMapImportRouteOperator,
         GeoMapAddRouteOperator,
@@ -140,6 +129,7 @@ def _load_classes():
         GeoMapImportAllRoutesOperator,
         GeoMapImportSelectedKmzOperator,
         GeoMapImportSelectedPoi3DOperator,
+        GeoMapImportSelectedModelCandidateOperator,
         GeoMapCancelOperator,
         GeoMapLoadHistoryOperator,
         GeoMapRenameHistoryOperator,
@@ -149,7 +139,6 @@ def _load_classes():
         GeoMapCreatePlaceLabelOperator,
         GeoMapUpdateLayerOperator,
         GeoMapSearchRoutePointOperator,
-        GeoMapOpenRoutesPanelOperator,
         GeoMapShowCoordinatesOperator,
         GeoMapRegenerateFromCacheOperator,
         GeoMapSavePresetOperator,
@@ -164,9 +153,9 @@ def _draw_routes_context_menu(self, context):
     if col is not None and col.get("geomap_bbox"):
         self.layout.separator()
         self.layout.operator(
-            "geomap.open_routes_popup",
-            text="Add Routes",
-            icon="CURVE_PATH",
+            "geomap.open_dashboard",
+            text="Open GeoMap Dashboard",
+            icon="WORLD",
         )
 
 
@@ -191,6 +180,19 @@ def _draw_place_label_context_menu(self, context):
     )
 
 
+def _draw_model_candidate_context_menu(self, context):
+    obj = getattr(context, "active_object", None)
+    if obj is None or obj.get("geomap_layer", "") != "model_candidate":
+        return
+
+    self.layout.separator()
+    self.layout.operator(
+        "geomap.import_selected_model_candidate",
+        text="Download and Apply 3D Model",
+        icon="IMPORT",
+    )
+
+
 def register():
     global _CONTEXT_MENUS_REGISTERED, _REGISTERED_CLASSES, _SCENE_PROPS_REGISTERED
     import bpy
@@ -206,6 +208,7 @@ def register():
     if not _CONTEXT_MENUS_REGISTERED:
         bpy.types.VIEW3D_MT_object_context_menu.append(_draw_routes_context_menu)
         bpy.types.VIEW3D_MT_object_context_menu.append(_draw_place_label_context_menu)
+        bpy.types.VIEW3D_MT_object_context_menu.append(_draw_model_candidate_context_menu)
         _CONTEXT_MENUS_REGISTERED = True
 
 
@@ -214,7 +217,11 @@ def unregister():
     import bpy
 
     if _CONTEXT_MENUS_REGISTERED:
-        for menu_func in (_draw_place_label_context_menu, _draw_routes_context_menu):
+        for menu_func in (
+            _draw_model_candidate_context_menu,
+            _draw_place_label_context_menu,
+            _draw_routes_context_menu,
+        ):
             try:
                 bpy.types.VIEW3D_MT_object_context_menu.remove(menu_func)
             except Exception:

@@ -52,3 +52,16 @@ def draw_text(
     blf.size(font_id, size)
     blf.color(font_id, *color)
     blf.draw(font_id, text)
+
+
+def text_width(text: str, size: int) -> float:
+    """Return rendered pixel width of a text string at the given font size.
+
+    Uses blf.dimensions() — must be called from within a GPU draw callback.
+    """
+    import blf
+
+    font_id = 0
+    blf.size(font_id, size)
+    w, _ = blf.dimensions(font_id, text)
+    return w

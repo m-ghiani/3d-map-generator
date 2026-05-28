@@ -3,7 +3,18 @@
     "id": "example-layer",
     "name": "Example KMZ Layer",
     "description": "Shown when its bbox intersects the selected GeoMap area.",
+    "type": "kmz",
     "url": "https://example.com/layer.kmz",
     "bbox": [45.0, 7.0, 46.0, 8.0]
+  },
+  {
+    "id": "example-glb-model",
+    "name": "Example GLB Model",
+    "description": "Creates a 3D model marker at lat/lon and imports the GLB from the context menu.",
+    "type": "glb",
+    "url": "https://example.com/model.glb",
+    "lat": 45.4642,
+    "lon": 9.1900,
+    "bbox": [45.40, 9.10, 45.52, 9.25]
   }
 ]

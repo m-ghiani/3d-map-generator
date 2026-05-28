@@ -23,6 +23,8 @@ class WeatherPoint:
     wind_dir: float = 0.0      # meteorological degrees: 0=from N, 90=from E
     precipitation: float = 0.0  # mm
     condition: str = "unknown"
+    temp_min: float = 0.0      # daily min °C
+    temp_max: float = 0.0      # daily max °C
 
 
 class WeatherClient:
@@ -111,11 +113,14 @@ class WeatherClient:
             params = (
                 f"latitude={lat:.5f}&longitude={lon:.5f}"
                 "&hourly=temperature_2m,wind_speed_10m,wind_direction_10m"
-                ",precipitation,weather_code&timezone=auto"
+                ",precipitation,weather_code"
+                "&daily=temperature_2m_min,temperature_2m_max"
+                "&timezone=auto"
                 f"&forecast_days={day + 1}"
             )
             data = self._get(f"{_OPEN_METEO_URL}?{params}")
             hourly = data.get("hourly", {})
+            daily = data.get("daily", {})
             idx = min(day * 24 + 12, len(hourly.get("time", [])) - 1)
             if idx >= 0:
                 return WeatherPoint(
@@ -126,14 +131,19 @@ class WeatherClient:
                     wind_dir=float(_at(hourly.get("wind_direction_10m"), idx)),
                     precipitation=float(_at(hourly.get("precipitation"), idx)),
                     condition=_wmo_condition(int(_at(hourly.get("weather_code"), idx))),
+                    temp_min=float(_at(daily.get("temperature_2m_min"), day)),
+                    temp_max=float(_at(daily.get("temperature_2m_max"), day)),
                 )
         params = (
             f"latitude={lat:.5f}&longitude={lon:.5f}"
             "&current=temperature_2m,wind_speed_10m,wind_direction_10m"
-            ",precipitation,weather_code&timezone=auto"
+            ",precipitation,weather_code"
+            "&daily=temperature_2m_min,temperature_2m_max"
+            "&timezone=auto&forecast_days=1"
         )
         data = self._get(f"{_OPEN_METEO_URL}?{params}")
         cur = data.get("current", {})
+        daily = data.get("daily", {})
         return WeatherPoint(
             lat=lat,
             lon=lon,
@@ -144,6 +154,8 @@ class WeatherClient:
             condition=_wmo_condition(
                 int(cur.get("weather_code", cur.get("weathercode", 0)))
             ),
+            temp_min=float(_at(daily.get("temperature_2m_min"), 0)),
+            temp_max=float(_at(daily.get("temperature_2m_max"), 0)),
         )
 
     def _fetch_openweathermap(
@@ -177,14 +189,18 @@ class WeatherClient:
     def _openweathermap_point(self, lat: float, lon: float, data: dict) -> WeatherPoint:
         wind = data.get("wind", {})
         rain = data.get("rain", {})
+        main = data.get("main", {})
+        temp = float(main.get("temp", 0))
         return WeatherPoint(
             lat=lat,
             lon=lon,
-            temperature=float(data.get("main", {}).get("temp", 0)),
+            temperature=temp,
             wind_speed=float(wind.get("speed", 0)) * 3.6,  # m/s → km/h
             wind_dir=float(wind.get("deg", 0)),
             precipitation=float(rain.get("1h", 0)),
             condition=data.get("weather", [{}])[0].get("main", "unknown").lower(),
+            temp_min=float(main.get("temp_min", temp)),
+            temp_max=float(main.get("temp_max", temp)),
         )
 
     def _fetch_weatherapi(
@@ -192,29 +208,32 @@ class WeatherClient:
     ) -> WeatherPoint:
         if not api_key:
             raise ProviderError("WeatherAPI key required")
+        days = max(1, min(int(forecast_day) + 1, 8))
+        data = self._get(
+            f"{_WEATHERAPI_FORECAST_URL}?key={api_key}&q={lat:.5f},{lon:.5f}"
+            f"&days={days}"
+        )
+        forecast_days = data.get("forecast", {}).get("forecastday", [])
+        if not forecast_days:
+            raise ProviderError("WeatherAPI returned no forecast days")
+        day_entry = forecast_days[min(forecast_day, len(forecast_days) - 1)]
+        day_summary = day_entry.get("day", {})
         if forecast_day > 0:
-            days = max(1, min(int(forecast_day) + 1, 8))
-            data = self._get(
-                f"{_WEATHERAPI_FORECAST_URL}?key={api_key}&q={lat:.5f},{lon:.5f}"
-                f"&days={days}"
-            )
-            forecast_days = data.get("forecast", {}).get("forecastday", [])
-            if not forecast_days:
-                raise ProviderError("WeatherAPI returned no forecast days")
-            day = forecast_days[min(forecast_day, len(forecast_days) - 1)]
-            hours = day.get("hour", [])
+            hours = day_entry.get("hour", [])
             cur = hours[12] if len(hours) > 12 else (hours[0] if hours else {})
         else:
-            data = self._get(f"{_WEATHERAPI_URL}?key={api_key}&q={lat:.5f},{lon:.5f}")
             cur = data.get("current", {})
+        temp = float(cur.get("temp_c", 0))
         return WeatherPoint(
             lat=lat,
             lon=lon,
-            temperature=float(cur.get("temp_c", 0)),
+            temperature=temp,
             wind_speed=float(cur.get("wind_kph", 0)),
             wind_dir=float(cur.get("wind_degree", 0)),
             precipitation=float(cur.get("precip_mm", 0)),
             condition=cur.get("condition", {}).get("text", "unknown").lower(),
+            temp_min=float(day_summary.get("mintemp_c", temp)),
+            temp_max=float(day_summary.get("maxtemp_c", temp)),
         )
 
     def _grid_samples(self, bbox: BoundingBox, grid_size: int) -> list[tuple[float, float]]:

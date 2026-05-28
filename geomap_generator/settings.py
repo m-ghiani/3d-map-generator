@@ -16,6 +16,7 @@ class ProviderSettings:
     maptiler_token: str = ""
     mapbox_token: str = ""
     google_token: str = ""
+    sketchfab_token: str = ""
     sentinel_hub_token: str = ""
     planet_token: str = ""
     maxar_token: str = ""
@@ -44,6 +45,10 @@ class ProviderSettings:
             maptiler_token=decrypt_token(getattr(prefs, "maptiler_token_encrypted", ""), "maptiler_token_encrypted"),
             mapbox_token=decrypt_token(getattr(prefs, "mapbox_token_encrypted", ""), "mapbox_token_encrypted"),
             google_token=decrypt_token(getattr(prefs, "google_token_encrypted", ""), "google_token_encrypted"),
+            sketchfab_token=decrypt_token(
+                getattr(prefs, "sketchfab_token_encrypted", ""),
+                "sketchfab_token_encrypted",
+            ),
             sentinel_hub_token=decrypt_token(
                 getattr(prefs, "sentinel_hub_token_encrypted", ""), "sentinel_hub_token_encrypted"
             ),
@@ -136,7 +141,11 @@ class GenerationSettings:
     weather_provider: str = "AUTO"
     weather_forecast_day: int = 0
     weather_granularity: str = "GRID"
+    weather_unit: str = "CELSIUS"
+    weather_orientation: str = "HORIZONTAL"
+    weather_z_rotation: float = 0.0
     weather_z_offset: float = 0.12
+    weather_follow_dem: bool = False
     weather_show_temperature: bool = True
     weather_show_wind: bool = True
     weather_grid_size: int = 3

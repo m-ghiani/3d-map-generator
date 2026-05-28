@@ -15,6 +15,7 @@ from .blender_scene import (
     add_shrinkwrap_nearest_surface,
     add_shrinkwrap_to_dem,
     clear_geomap_child_collection,
+    link_to_geomap_collection,
 )
 from .dem import DemClient
 from .download_cache import (
@@ -33,17 +34,31 @@ from .exceptions import (
 from .geometry_payload import build_building_batch_payload, build_vector_payload
 from .imagery import SatelliteImageryClient
 from .kmz import (
+    asset_entries_for_bbox,
+    asset_entry_location,
     catalog_paths,
     current_bbox_from_context,
+    download_catalog_asset,
     download_kmz,
     entry_by_id,
     parse_kmz,
 )
 from .layer_style import collection_name_for_layer, vector_layer_identity
 from .mesh_builder import BboxProjector, DemHeightSampler
+from .model_library import (
+    find_sketchfab_model,
+    google_photorealistic_3d_tiles_url,
+    sketchfab_search_url,
+)
 from .models import BoundingBox, DemGrid, GeoMapData, SatelliteTile
 from .overpass import OsmApiClient
-from .osm_3d import Osm3DModelClient, Osm3DModelRenderer
+from .osm_3d import (
+    Osm3DModelClient,
+    Osm3DModelRenderer,
+    aggregate_building_parts,
+    building_batch_color,
+    building_batch_material_key,
+)
 from .persistent_log import configure_blender_log_path
 from .progress import ProgressTracker
 from .search_cache import (
@@ -142,6 +157,7 @@ class GeoMapGenerateOperator(Operator):
         self._satellite_tiles: list[SatelliteTile] = []
         self._dem_grid: DemGrid | None = None
         self._dem_tiles: list[tuple[SatelliteTile, DemGrid]] = []
+        self._model_candidates: list = []
         self._mesh_steps = None
 
         thread = threading.Thread(target=self._generate_threaded, daemon=True)
@@ -363,6 +379,20 @@ class GeoMapGenerateOperator(Operator):
                 f"{self._dem_grid.min_elevation():.0f}–{self._dem_grid.max_elevation():.0f} m"
             )
 
+        tracker.set_status("Finding available 3D models...", 0.81)
+        try:
+            provider = getattr(props, "building_provider", self._provider("road_provider"))
+            self._model_candidates = Osm3DModelClient().list_model_candidates(
+                bbox,
+                provider=provider,
+            )
+            self._model_candidates.extend(self._asset_candidates_for_bbox(bbox))
+            self._enrich_model_candidates(self._model_candidates, self._prefs)
+            tracker.log(f"Available 3D model markers: {len(self._model_candidates)}")
+        except Exception as exc:
+            self._model_candidates = []
+            tracker.log(f"⚠ 3D model catalog failed ({exc}), continuing")
+
         if (
             (not data or not data.ways)
             and not props.import_satellite
@@ -388,6 +418,18 @@ class GeoMapGenerateOperator(Operator):
         self._satellite_tiles = result.satellite_tiles
         self._dem_grid = result.dem_grid
         self._dem_tiles = result.dem_tiles
+        try:
+            provider = getattr(self._props, "building_provider", self._provider("road_provider"))
+            self._model_candidates = Osm3DModelClient().list_model_candidates(
+                result.osm_data.bbox,
+                provider=provider,
+            )
+            self._model_candidates.extend(self._asset_candidates_for_bbox(result.osm_data.bbox))
+            self._enrich_model_candidates(self._model_candidates, self._prefs)
+            tracker.log(f"Available 3D model markers: {len(self._model_candidates)}")
+        except Exception as exc:
+            self._model_candidates = []
+            tracker.log(f"⚠ 3D model catalog failed ({exc}), continuing")
         tracker.set_status("External geographic data fetched", 0.83)
         return result.osm_data
 
@@ -936,6 +978,18 @@ class GeoMapGenerateOperator(Operator):
                 tracker.log(f"Land use rendered: {len(landuse_objects)} objects")
                 yield
 
+            model_marker_objects = self._render_model_candidate_markers(
+                context,
+                self._model_candidates,
+                osm_data.bbox,
+                props,
+                dem_sampler,
+                scene_scale,
+            )
+            if model_marker_objects:
+                tracker.log(f"3D model markers placed: {len(model_marker_objects)}")
+                yield
+
             if not vector_layers and not building_ways and not osm_data.points:
                 AnnotationRenderer._annotate_root_collection(
                     context, osm_data.bbox, props, scene_scale.km_per_bu
@@ -1046,6 +1100,7 @@ class GeoMapGenerateOperator(Operator):
                 self._raise_if_cancelled(tracker)
                 phase_at = time.time()
                 buildings = Osm3DModelClient().buildings_from_ways(building_ways)
+                buildings = aggregate_building_parts(buildings)
                 use_detailed = self._use_detailed_buildings(props, osm_data.bbox)
 
                 if use_detailed:
@@ -1074,11 +1129,15 @@ class GeoMapGenerateOperator(Operator):
                     _DETAIL_YIELD_EVERY = 20
                     for bld_index, building in enumerate(buildings, start=1):
                         self._raise_if_cancelled(tracker)
-                        terrain_z = (
-                            dem_sampler.sample_z(building.center_lat, building.center_lon)
-                            if dem_sampler and props.drape_vectors_on_dem
-                            else 0.0
-                        )
+                        if dem_sampler and props.drape_vectors_on_dem:
+                            # Per-vertex sampling: min so building sits on terrain regardless of slope
+                            terrain_z = (
+                                min(dem_sampler.sample_z(n.lat, n.lon) for n in building.geometry)
+                                if building.geometry
+                                else dem_sampler.sample_z(building.center_lat, building.center_lon)
+                            )
+                        else:
+                            terrain_z = 0.0
                         try:
                             obj = renderer.render_building(
                                 context,
@@ -1101,7 +1160,16 @@ class GeoMapGenerateOperator(Operator):
                             )
                             yield
                 else:
-                    building_chunks = self._building_chunks(buildings)
+                    # Group buildings by material category for coloured batch meshes
+                    mat_groups: dict[str, list] = {}
+                    for _b in buildings:
+                        _key = building_batch_material_key(_b.tags)
+                        mat_groups.setdefault(_key, []).append(_b)
+                    all_chunks: list[tuple] = []  # (batch, mat_key)
+                    for _mat_key, _mat_blds in mat_groups.items():
+                        for _chunk in self._building_chunks(_mat_blds):
+                            all_chunks.append((_chunk, _mat_key))
+
                     total_steps = self._mesh_progress_total_steps(
                         satellite_count=len(self._satellite_tiles)
                         if props.import_satellite and not props.import_relief
@@ -1110,11 +1178,12 @@ class GeoMapGenerateOperator(Operator):
                         has_single_dem=bool(props.import_relief and self._dem_grid and not self._dem_tiles),
                         vector_layer_count=len(vector_layers),
                         point_count=len(points),
-                        building_chunk_count=len(building_chunks),
+                        building_chunk_count=len(all_chunks),
                     )
                     tracker.log(
                         f"Prepared {len(buildings)} 3D building footprints "
-                        f"as {len(building_chunks)} merged mesh chunk(s) "
+                        f"as {len(all_chunks)} material-grouped chunk(s) "
+                        f"({len(mat_groups)} material bucket(s)) "
                         f"in {time.time() - phase_at:.2f}s"
                     )
                     tracker.set_status(
@@ -1125,10 +1194,10 @@ class GeoMapGenerateOperator(Operator):
 
                     renderer = Osm3DModelRenderer()
                     z_offset = scaled_map_value(props.vector_z_offset, scene_scale)
-                    for chunk_index, batch in enumerate(building_chunks, start=1):
+                    for chunk_index, (batch, mat_key) in enumerate(all_chunks, start=1):
                         self._raise_if_cancelled(tracker)
                         tracker.set_status(
-                            f"Preparing merged 3D buildings mesh {chunk_index}/{len(building_chunks)}",
+                            f"Preparing merged 3D buildings mesh {chunk_index}/{len(all_chunks)}",
                             self._mesh_progress(completed_steps, total_steps),
                         )
                         phase_at = time.time()
@@ -1140,7 +1209,8 @@ class GeoMapGenerateOperator(Operator):
                             dem_sampler,
                             scene_scale,
                             z_offset,
-                            name=self._building_chunk_name(chunk_index, len(building_chunks)),
+                            name=self._building_chunk_name(chunk_index, len(all_chunks)),
+                            material_key=mat_key,
                         )
                         while not future.done():
                             self._raise_if_cancelled(tracker)
@@ -1148,16 +1218,16 @@ class GeoMapGenerateOperator(Operator):
                         payload = future.result()
                         completed_steps += 1
                         tracker.log(
-                            f"Merged 3D buildings payload {chunk_index}/{len(building_chunks)} "
-                            f"prepared in {time.time() - phase_at:.2f}s"
+                            f"Merged 3D buildings payload {chunk_index}/{len(all_chunks)} "
+                            f"({mat_key}) prepared in {time.time() - phase_at:.2f}s"
                         )
                         tracker.set_status(
-                            f"Prepared merged 3D buildings mesh {chunk_index}/{len(building_chunks)}",
+                            f"Prepared merged 3D buildings mesh {chunk_index}/{len(all_chunks)}",
                             self._mesh_progress(completed_steps, total_steps),
                         )
                         yield
                         tracker.set_status(
-                            f"Committing merged 3D buildings mesh {chunk_index}/{len(building_chunks)}",
+                            f"Committing merged 3D buildings mesh {chunk_index}/{len(all_chunks)}",
                             self._mesh_progress(completed_steps, total_steps),
                         )
                         commit_at = time.time()
@@ -1169,14 +1239,14 @@ class GeoMapGenerateOperator(Operator):
                         if obj:
                             building_objects.append(obj)
                         tracker.log(
-                            f"Merged 3D buildings mesh {chunk_index}/{len(building_chunks)} committed "
+                            f"Merged 3D buildings mesh {chunk_index}/{len(all_chunks)} committed "
                             f"with {payload.building_count} simplified buildings "
                             f"in {time.time() - commit_at:.2f}s"
                         )
                         completed_steps += 1
                         tracker.set_status(
                             f"Committed merged 3D buildings mesh "
-                            f"{chunk_index}/{len(building_chunks)}",
+                            f"{chunk_index}/{len(all_chunks)}",
                             self._mesh_progress(completed_steps, total_steps),
                         )
                         yield
@@ -1340,6 +1410,140 @@ class GeoMapGenerateOperator(Operator):
         return objects
 
     @staticmethod
+    def _render_model_candidate_markers(
+        context,
+        candidates,
+        bbox: BoundingBox,
+        props,
+        dem_sampler: DemHeightSampler | None,
+        scene_scale: SceneScale,
+    ) -> list:
+        if not candidates:
+            clear_geomap_child_collection("3D Model Markers")
+            return []
+        import bpy as _bpy
+
+        clear_geomap_child_collection("3D Model Markers")
+        projector = BboxProjector(bbox, props.detail_level)
+        marker_size = scaled_map_value(0.12, scene_scale)
+        z_lift = scaled_map_value(float(props.vector_z_offset) * 2.0 + 0.05, scene_scale)
+        created = []
+        used_names: dict[str, int] = {}
+        for candidate in candidates:
+            x, y, _ = projector.project(candidate.lat, candidate.lon)
+            terrain_z = (
+                dem_sampler.sample_z(candidate.lat, candidate.lon)
+                if dem_sampler and props.drape_vectors_on_dem
+                else 0.0
+            )
+            base_name = "GeoMap_Model_" + "".join(
+                ch if ch.isalnum() or ch in {"_", "-"} else "_"
+                for ch in str(candidate.name).strip()
+            )[:36]
+            count = used_names.get(base_name, 0)
+            used_names[base_name] = count + 1
+            obj_name = base_name if count == 0 else f"{base_name}_{count + 1}"
+            obj = _bpy.data.objects.new(obj_name, None)
+            obj.empty_display_type = "CUBE"
+            obj.empty_display_size = marker_size
+            obj.location = (x, y, terrain_z + z_lift)
+            obj.color = (0.95, 0.72, 0.18, 1.0)
+            obj["geomap_layer"] = "model_candidate"
+            obj["geomap_model_name"] = candidate.name
+            obj["geomap_osm_id"] = str(candidate.id)
+            obj["geomap_osm_type"] = candidate.osm_type
+            obj["geomap_lat"] = candidate.lat
+            obj["geomap_lon"] = candidate.lon
+            source = str(getattr(candidate, "source", "osm"))
+            obj["geomap_model_source"] = source
+            obj["geomap_model_has_geometry"] = bool(getattr(candidate, "has_geometry", False))
+            if source == "catalog":
+                obj["geomap_asset_id"] = str(getattr(candidate, "asset_id", ""))
+                obj["geomap_asset_type"] = str(getattr(candidate, "asset_type", ""))
+                obj["geomap_asset_url"] = str(getattr(candidate, "url", ""))
+                obj["geomap_asset_path"] = str(getattr(candidate, "path", ""))
+            sketchfab = getattr(candidate, "sketchfab", None)
+            if isinstance(sketchfab, dict):
+                obj["geomap_sketchfab_query"] = sketchfab.get("query", "")
+                obj["geomap_sketchfab_search_url"] = sketchfab.get("search_url", "")
+                obj["geomap_sketchfab_uid"] = sketchfab.get("uid", "")
+                obj["geomap_sketchfab_model_url"] = sketchfab.get("viewer_url", "")
+                obj["geomap_sketchfab_download_api_url"] = sketchfab.get("download_api_url", "")
+                obj["geomap_sketchfab_license"] = sketchfab.get("license", "")
+                obj["geomap_sketchfab_author"] = sketchfab.get("author", "")
+                obj["geomap_sketchfab_downloadable"] = bool(sketchfab.get("is_downloadable", False))
+            google_url = str(getattr(candidate, "google_3d_tiles_url", ""))
+            if google_url:
+                obj["geomap_google_photorealistic_3d_tiles_url"] = google_url
+            link_to_geomap_collection(context, obj, "3D Model Markers")
+            created.append(obj)
+        return created
+
+    @staticmethod
+    def _enrich_model_candidates(candidates, prefs: ProviderSettings | None) -> None:
+        sketchfab_token = getattr(prefs, "sketchfab_token", "") if prefs else ""
+        google_token = getattr(prefs, "google_token", "") if prefs else ""
+        google_url = google_photorealistic_3d_tiles_url(google_token) if google_token else ""
+        for candidate in candidates[:40]:
+            query = str(getattr(candidate, "name", "") or "").strip()
+            if query:
+                try:
+                    sketchfab = find_sketchfab_model(query, token=sketchfab_token)
+                except Exception:
+                    sketchfab = None
+                if sketchfab is None:
+                    sketchfab = {
+                        "query": query,
+                        "search_url": sketchfab_search_url(query),
+                        "uid": "",
+                        "viewer_url": "",
+                        "download_api_url": "",
+                        "license": "",
+                        "author": "",
+                        "is_downloadable": False,
+                    }
+                try:
+                    setattr(candidate, "sketchfab", sketchfab)
+                except Exception:
+                    pass
+            if google_url:
+                try:
+                    setattr(candidate, "google_3d_tiles_url", google_url)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _asset_candidates_for_bbox(bbox: BoundingBox) -> list:
+        candidates = []
+        for entry in asset_entries_for_bbox(bbox):
+            loc = asset_entry_location(entry)
+            if loc is None:
+                continue
+            lat, lon = loc
+            entry_id = str(entry.get("id") or entry.get("url") or entry.get("path"))
+            source = str(entry.get("url") or entry.get("path") or "")
+            asset_type = str(entry.get("type") or entry.get("asset_type") or "").lower().strip(".")
+            if not asset_type:
+                asset_type = Path(source.split("?", 1)[0]).suffix.lower().strip(".") or "kmz"
+            candidates.append(
+                SimpleNamespace(
+                    id=abs(hash(("catalog", entry_id))) % 2_000_000_000,
+                    osm_type="catalog",
+                    name=str(entry.get("name") or entry_id),
+                    lat=lat,
+                    lon=lon,
+                    tags={},
+                    source="catalog",
+                    has_geometry=True,
+                    asset_id=entry_id,
+                    asset_type=asset_type,
+                    url=str(entry.get("url") or ""),
+                    path=str(entry.get("path") or ""),
+                )
+            )
+        return candidates
+
+    @staticmethod
     def _build_building_payloads(
         buildings,
         bbox: BoundingBox,
@@ -1348,13 +1552,22 @@ class GeoMapGenerateOperator(Operator):
         scene_scale: SceneScale,
         z_offset: float,
         name: str,
+        material_key: str = "default",
     ):
         def base_z_for_building(building):
-            terrain_z = (
-                dem_sampler.sample_z(building.center_lat, building.center_lon)
-                if dem_sampler and props.drape_vectors_on_dem
-                else 0.0
-            )
+            if dem_sampler and props.drape_vectors_on_dem:
+                # Per-vertex DEM sampling: use minimum so building never sinks into terrain
+                if building.geometry:
+                    terrain_z = min(
+                        dem_sampler.sample_z(node.lat, node.lon)
+                        for node in building.geometry
+                    )
+                else:
+                    terrain_z = dem_sampler.sample_z(
+                        building.center_lat, building.center_lon
+                    )
+            else:
+                terrain_z = 0.0
             return terrain_z + z_offset
 
         return build_building_batch_payload(
@@ -1365,6 +1578,7 @@ class GeoMapGenerateOperator(Operator):
             base_z_for_building,
             name=name,
             max_vertices_per_building=12,
+            material_color=building_batch_color(material_key),
         )
 
     @classmethod
@@ -1757,11 +1971,6 @@ _FEATURE_FLAGS: dict[str, dict[str, bool]] = {
     "LANDUSE":    {"import_landuse": True},
     "CITIES":     {
         "import_cities": True,
-        "import_place_labels": True,
-        "import_poi_historic": True,
-        "import_poi_cultural": True,
-        "import_poi_administrative": True,
-        "import_poi_natural": True,
     },
 }
 
@@ -1987,10 +2196,18 @@ class GeoMapUpdateLayerOperator(Operator):
         building_objects = []
         if settings.import_buildings and building_ways:
             buildings = Osm3DModelClient().buildings_from_ways(building_ways)
-            chunks = GeoMapGenerateOperator._building_chunks(buildings)
+            buildings = aggregate_building_parts(buildings)
+            _mat_grps: dict[str, list] = {}
+            for _b in buildings:
+                _k = building_batch_material_key(_b.tags)
+                _mat_grps.setdefault(_k, []).append(_b)
+            _all_chunks: list[tuple] = []
+            for _mk, _mb in _mat_grps.items():
+                for _ch in GeoMapGenerateOperator._building_chunks(_mb):
+                    _all_chunks.append((_ch, _mk))
             renderer = Osm3DModelRenderer()
             z_offset = scaled_map_value(settings.vector_z_offset, scene_scale)
-            for chunk_index, chunk in enumerate(chunks, start=1):
+            for chunk_index, (chunk, mat_key) in enumerate(_all_chunks, start=1):
                 payload = GeoMapGenerateOperator._build_building_payloads(
                     chunk,
                     bbox,
@@ -1998,7 +2215,8 @@ class GeoMapUpdateLayerOperator(Operator):
                     dem_sampler,
                     scene_scale,
                     z_offset,
-                    name=GeoMapGenerateOperator._building_chunk_name(chunk_index, len(chunks)),
+                    name=GeoMapGenerateOperator._building_chunk_name(chunk_index, len(_all_chunks)),
+                    material_key=mat_key,
                 )
                 obj = renderer.commit_batch_payload(context, payload, chunk_index)
                 if obj:
@@ -2017,15 +2235,21 @@ class GeoMapUpdateLayerOperator(Operator):
         scene_scale: SceneScale,
         tracker: ProgressTracker,
     ) -> None:
-        tracker.log("Updating buildings layer only")
+        tracker.log("Updating buildings layer only (map3d batch query: ways + relations)")
         clear_geomap_child_collection("3D Models")
 
-        op = self._vector_fetch_context(prefs)
-        data = GeoMapGenerateOperator._fetch_vector_data(op, bbox, settings, tracker)
-        building_ways, _lw, _vw = GeoMapGenerateOperator._split_building_ways(data, settings)
-        if not building_ways:
-            tracker.log("No building ways in this area")
+        # Dedicated single-query fetch: way["building"] + relation["building"] + building:part.
+        # Mirrors map3d's approach — one Overpass call with `out body geom`, no secondary
+        # node-resolution round-trip, captures multipolygon relation buildings too.
+        provider = getattr(prefs, "road_provider", "AUTO")
+        buildings = Osm3DModelClient().fetch_buildings_in_bbox(bbox, provider=provider)
+        if not buildings:
+            tracker.log("No buildings found in this area")
             return
+        buildings = aggregate_building_parts(buildings)
+        tracker.log(
+            f"Fetched {len(buildings)} buildings (ways + relations) via dedicated query"
+        )
 
         dem_sampler = None
         if settings.import_relief and settings.drape_vectors_on_dem:
@@ -2033,17 +2257,27 @@ class GeoMapUpdateLayerOperator(Operator):
             grid = DemClient().fetch_grid(bbox, settings.dem_resolution, provider=prefs.dem_provider)
             dem_sampler = DemHeightSampler([grid], scene_scale.dem_height_scale)
 
-        buildings = Osm3DModelClient().buildings_from_ways(building_ways)
-        chunks = GeoMapGenerateOperator._building_chunks(buildings)
+        mat_groups: dict[str, list] = {}
+        for _b in buildings:
+            _key = building_batch_material_key(_b.tags)
+            mat_groups.setdefault(_key, []).append(_b)
+        all_chunks: list[tuple] = []
+        for _mat_key, _mat_blds in mat_groups.items():
+            for _chunk in GeoMapGenerateOperator._building_chunks(_mat_blds):
+                all_chunks.append((_chunk, _mat_key))
+
         renderer = Osm3DModelRenderer()
         z_offset = scaled_map_value(settings.vector_z_offset, scene_scale)
-        for chunk_index, chunk in enumerate(chunks, start=1):
+        for chunk_index, (chunk, mat_key) in enumerate(all_chunks, start=1):
             payload = GeoMapGenerateOperator._build_building_payloads(
                 chunk, bbox, settings, dem_sampler, scene_scale, z_offset,
-                name=GeoMapGenerateOperator._building_chunk_name(chunk_index, len(chunks)),
+                name=GeoMapGenerateOperator._building_chunk_name(chunk_index, len(all_chunks)),
+                material_key=mat_key,
             )
             renderer.commit_batch_payload(context, payload, chunk_index)
-        tracker.log(f"Updated buildings: {len(buildings)} models in {len(chunks)} chunks")
+        tracker.log(
+            f"Updated buildings: {len(buildings)} models in {len(all_chunks)} material chunks"
+        )
 
     def _update_annotations(
         self,
@@ -2081,6 +2315,14 @@ class GeoMapUpdateLayerOperator(Operator):
         # Build settings with all vector flags off, then turn on only this feature
         off = {f: False for f in _ALL_VECTOR_FLAGS}
         on = _FEATURE_FLAGS.get(feature, {})
+        if feature == "CITIES":
+            on = {
+                **on,
+                "import_poi_historic": settings.import_poi_historic,
+                "import_poi_cultural": settings.import_poi_cultural,
+                "import_poi_administrative": settings.import_poi_administrative,
+                "import_poi_natural": settings.import_poi_natural,
+            }
         single_settings = dataclasses.replace(settings, **{**off, **on})
 
         op = self._vector_fetch_context(prefs)
@@ -2359,6 +2601,180 @@ class GeoMapImportSelectedPoi3DOperator(Operator):
     def _overpass_provider(context) -> str:
         prefs = GeoMapGenerateOperator._get_addon_preferences(context)
         return getattr(prefs, "road_provider", "AUTO") if prefs else "AUTO"
+
+
+class GeoMapImportSelectedModelCandidateOperator(Operator):
+    bl_idname = "geomap.import_selected_model_candidate"
+    bl_label = "Import Selected 3D Model"
+    bl_description = "Download and apply the 3D model represented by the selected GeoMap model marker"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return bool(obj and obj.get("geomap_layer", "") == "model_candidate")
+
+    def execute(self, context):
+        marker = context.active_object
+        if marker is None:
+            self.report({"ERROR"}, "Select a GeoMap 3D model marker first")
+            return {"CANCELLED"}
+
+        configure_blender_log_path()
+        tracker = ProgressTracker.get_instance()
+
+        osm_id = marker.get("geomap_osm_id")
+        osm_type = marker.get("geomap_osm_type")
+        lat = marker.get("geomap_lat")
+        lon = marker.get("geomap_lon")
+        model_source = marker.get("geomap_model_source") or "osm"
+        tracker.log(
+            "3D model import requested: "
+            f"marker='{marker.name}' source={model_source} "
+            f"osm_type={osm_type} osm_id={osm_id} lat={lat} lon={lon} "
+            f"has_geometry={marker.get('geomap_model_has_geometry')} "
+            f"asset_type={marker.get('geomap_asset_type') or ''} "
+            f"asset_id={marker.get('geomap_asset_id') or ''}"
+        )
+        if not osm_id or lat is None or lon is None:
+            self.report({"ERROR"}, "Selected marker has incomplete OSM model metadata")
+            tracker.log("✗ 3D model marker metadata is incomplete")
+            return {"CANCELLED"}
+
+        try:
+            if marker.get("geomap_model_source") == "catalog":
+                tracker.log(
+                    "3D model marker is catalog asset: "
+                    f"url={marker.get('geomap_asset_url') or ''} "
+                    f"path={marker.get('geomap_asset_path') or ''}"
+                )
+                obj_count = self._import_catalog_asset(context, marker)
+                marker["geomap_model_imported"] = True
+                tracker.log(f"✓ Catalog 3D asset imported objects={obj_count}")
+                self.report({"INFO"}, f"Imported catalog asset: {obj_count} object(s)")
+                return {"FINISHED"}
+
+            bbox, detail_level, km_per_bu = GeoMapImportSelectedPoi3DOperator._map_metadata()
+            tracker.log(
+                "3D model map metadata: "
+                f"bbox={bbox.to_overpass()} detail={detail_level} km_per_bu={km_per_bu:.6f}"
+            )
+            prefs = GeoMapGenerateOperator._get_addon_preferences(context)
+            provider = getattr(context.scene.geomap_props, "building_provider", "AUTO")
+            if not provider or provider == "AUTO":
+                provider = getattr(prefs, "road_provider", "AUTO") if prefs else "AUTO"
+            tracker.log(f"3D model provider resolved: {provider}")
+            building = Osm3DModelClient().fetch_model_by_id(
+                int(osm_id),
+                str(osm_type),
+                provider=provider,
+                debug_log=tracker.log,
+            )
+            tracker.log(
+                "3D model fetched: "
+                f"name='{building.name}' height={building.height_m:.2f}m "
+                f"vertices={len(building.geometry)} tags={sorted(building.tags.keys())[:12]}"
+            )
+            obj = Osm3DModelRenderer().render_building(
+                context,
+                building,
+                bbox,
+                detail_level,
+                km_per_bu,
+                base_z=marker.location.z,
+                use_osm_material=True,
+            )
+            obj["geomap_source_marker"] = marker.name
+            marker["geomap_model_imported"] = True
+            tracker.log(f"✓ 3D model imported object='{obj.name}'")
+        except Exception as error:
+            tracker.log(f"✗ 3D model import failed: {error}")
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Imported 3D model: {obj.name}")
+        return {"FINISHED"}
+
+    @staticmethod
+    def _import_catalog_asset(context, marker) -> int:
+        import bpy as _bpy
+
+        source = marker.get("geomap_asset_url") or marker.get("geomap_asset_path")
+        if not source:
+            raise RuntimeError("Selected catalog marker has no asset URL/path")
+        entry = {
+            "id": marker.get("geomap_asset_id") or marker.name,
+            "name": marker.get("geomap_model_name") or marker.name,
+            "url": marker.get("geomap_asset_url") or "",
+            "path": marker.get("geomap_asset_path") or "",
+            "type": marker.get("geomap_asset_type") or "",
+        }
+        path = download_catalog_asset(entry, namespace="model_assets")
+        suffix = path.suffix.lower()
+        if suffix in {".kmz", ".kml"}:
+            return GeoMapImportSelectedModelCandidateOperator._import_catalog_kmz(
+                context,
+                path,
+            )
+        if suffix in {".glb", ".gltf"}:
+            before = set(_bpy.data.objects)
+            result = _bpy.ops.import_scene.gltf(filepath=str(path))
+            if "FINISHED" not in result:
+                raise RuntimeError(f"Blender could not import {path.name}")
+            imported = [obj for obj in _bpy.data.objects if obj not in before]
+            for obj in imported:
+                obj.location.x += marker.location.x
+                obj.location.y += marker.location.y
+                obj.location.z += marker.location.z
+                obj["geomap_layer"] = "catalog_3d_model"
+                obj["geomap_asset_source"] = source
+                try:
+                    link_to_geomap_collection(context, obj, "3D Models")
+                except RuntimeError:
+                    pass
+            return len(imported)
+        raise RuntimeError(f"Unsupported catalog asset type: {suffix or path.name}")
+
+    @staticmethod
+    def _import_catalog_kmz(context, path: Path) -> int:
+        props = context.scene.geomap_props
+        apply_quality_preset_to_props(props)
+        apply_output_preset_to_props(props)
+        settings = GenerationSettings.from_props(props)
+        prefs = ProviderSettings.from_preferences(
+            GeoMapGenerateOperator._get_addon_preferences(context)
+        )
+        bbox = current_bbox_from_context(context, resolve_place=True)
+        if bbox is None:
+            raise RuntimeError("Set a coordinate bbox or generate a map first.")
+        data = parse_kmz(path, bbox)
+        scene_scale = SceneScale.from_scene(
+            context.scene,
+            bbox,
+            settings.detail_level,
+            settings.dem_height_scale,
+        )
+        dem_sampler = GeoMapImportSelectedKmzOperator._dem_sampler_for_import(
+            bbox,
+            settings,
+            prefs,
+            scene_scale,
+        )
+        renderer = VectorRenderer()
+        vector_objects = renderer.render_layers(
+            context,
+            GeoMapGenerateOperator._split_vector_layers(data),
+            settings,
+            dem_sampler,
+            scene_scale,
+        )
+        point_objects = renderer.render_points(
+            context,
+            data,
+            settings,
+            dem_sampler,
+            scene_scale,
+        )
+        return len(vector_objects) + len(point_objects)
 
 
 class GeoMapSearchRoutePointOperator(Operator):
@@ -2699,8 +3115,8 @@ class GeoMapImportAllRoutesOperator(Operator):
 
 class GeoMapOpenRoutesPanelOperator(Operator):
     bl_idname = "geomap.open_routes_popup"
-    bl_label = "Add Routes"
-    bl_description = "Open GeoMap route configuration"
+    bl_label = "Open GeoMap Dashboard"
+    bl_description = "Open the GeoMap dashboard route tab"
 
     @classmethod
     def poll(cls, context):
@@ -2709,11 +3125,8 @@ class GeoMapOpenRoutesPanelOperator(Operator):
         return col is not None and bool(col.get("geomap_bbox"))
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_popup(self, width=320)
-
-    def draw(self, context):
-        from .panels import GeoMapRoutePanel
-        GeoMapRoutePanel.draw(self, context)
+        import bpy as _bpy
+        return _bpy.ops.geomap.open_dashboard("INVOKE_DEFAULT")
 
     def execute(self, context):
         return {"FINISHED"}

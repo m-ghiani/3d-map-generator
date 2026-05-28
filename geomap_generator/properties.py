@@ -88,6 +88,16 @@ _WEATHER_GRANULARITY_ITEMS = [
     ("GRID", "Grid", "Sample an NxN grid over the selected map area"),
 ]
 
+_WEATHER_UNIT_ITEMS = [
+    ("CELSIUS", "Celsius", "Display temperatures in degrees Celsius"),
+    ("FAHRENHEIT", "Fahrenheit", "Display temperatures in degrees Fahrenheit"),
+]
+
+_WEATHER_ORIENTATION_ITEMS = [
+    ("HORIZONTAL", "Horizontal", "Place weather icons flat above the map"),
+    ("VERTICAL", "Vertical", "Place weather icons upright like billboards"),
+]
+
 _PLACE_LABEL_FONT_ITEMS = [
     ("DEFAULT", "Default", "Use Blender's default font"),
     ("SANS", "Sans", "Use a clean sans-serif system font if available"),
@@ -177,6 +187,11 @@ class GeoMapAddonPreferences(bpy.types.AddonPreferences):
         subtype="PASSWORD",
     )
     google_token_encrypted: StringProperty(options={"HIDDEN"})
+    sketchfab_token: StringProperty(
+        name="Sketchfab OAuth Token",
+        subtype="PASSWORD",
+    )
+    sketchfab_token_encrypted: StringProperty(options={"HIDDEN"})
     sentinel_hub_token: StringProperty(
         name="Sentinel Hub Token",
         subtype="PASSWORD",
@@ -248,6 +263,21 @@ class GeoMapAddonPreferences(bpy.types.AddonPreferences):
             op = weather_box.operator("geomap.store_basemap_token", text="Store Encrypted")
             op.token_prop = "weatherapi_token"
             op.encrypted_prop = "weatherapi_token_encrypted"
+
+        model_box = layout.box()
+        model_box.label(text="3D Model Libraries")
+        model_box.prop(self, "sketchfab_token")
+        op = model_box.operator("geomap.store_basemap_token", text="Store Sketchfab Token")
+        op.token_prop = "sketchfab_token"
+        op.encrypted_prop = "sketchfab_token_encrypted"
+        from .token_security import has_encrypted_token
+        model_box.label(
+            text=(
+                "Sketchfab token stored: yes"
+                if has_encrypted_token(getattr(self, "sketchfab_token_encrypted", ""))
+                else "Sketchfab token stored: no"
+            )
+        )
 
         stats = cache_stats()
         cache_box = layout.box()
@@ -759,6 +789,29 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         default="GRID",
         description="How weather sampling points are selected",
     )
+    weather_unit: EnumProperty(
+        name="Temperature Unit",
+        items=_WEATHER_UNIT_ITEMS,
+        default="CELSIUS",
+        description="Unit used for weather temperature labels",
+    )
+    weather_orientation: EnumProperty(
+        name="Weather Orientation",
+        items=_WEATHER_ORIENTATION_ITEMS,
+        default="HORIZONTAL",
+        description="Whether weather icons and text are flat or upright",
+    )
+    weather_z_rotation: FloatProperty(
+        name="Z Rotation",
+        default=0.0,
+        min=-180.0,
+        max=180.0,
+        soft_min=-180.0,
+        soft_max=180.0,
+        step=10,
+        precision=1,
+        description="Rotation in degrees around the Z axis for weather icons and text",
+    )
     weather_z_offset: FloatProperty(
         name="Icon Height",
         default=0.12,
@@ -770,6 +823,11 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         precision=3,
         description="Vertical offset for weather mesh icons above the map in Blender units",
     )
+    weather_follow_dem: BoolProperty(
+        name="Follow DEM Height",
+        default=False,
+        description="Place each weather icon above the local DEM surface instead of using one global height",
+    )
     weather_show_temperature: BoolProperty(
         name="Temperature",
         default=True,
@@ -779,6 +837,11 @@ class GeoMapProperties(bpy.types.PropertyGroup):
         name="Wind Arrows",
         default=True,
         description="Show wind direction arrows",
+    )
+    weather_show_temp_range: BoolProperty(
+        name="Min/Max Range",
+        default=True,
+        description="Show daily min/max temperature range below temperature badge",
     )
     weather_grid_size: IntProperty(
         name="Grid Points",
